@@ -304,6 +304,21 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.settings.set('window/splitter_state', self._splitter.saveState())
         self.settings.sync()
 
+    def _set_media_window_title(self, path=None):
+        """Sync Qt's caption with Maya's separately managed workspace title.
+
+        Maya retains workspaceControl labels independently of QWidget title and
+        QSettings geometry, so always explicitly reset it for a fresh window.
+        """
+        title = ('FrameReviewer: ' + os.path.basename(path)) if path else 'FrameReviewer'
+        self.setWindowTitle(title)
+        if cmds is not None:
+            try:
+                if cmds.workspaceControl(self._workspace_control, query=True, exists=True):
+                    cmds.workspaceControl(self._workspace_control, edit=True, label=title)
+            except (RuntimeError, ValueError):
+                pass
+
     def _reset_preferences(self):
         result = QtWidgets.QMessageBox.question(
             self, 'Reset FrameReviewer Preferences',
@@ -1332,7 +1347,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.player.set_loop(self.act_loop.isChecked())
         self.player.set_speed(float(self.speed_combo.currentData() or 1.0))
 
-        self.setWindowTitle('FrameReviewer: {}'.format(os.path.basename(info.path)))
+        self._set_media_window_title(info.path)
         self.media_lbl.setToolTip(info.path)
         self.media_lbl.setText('{} × {}\n{:g} fps  ·  {} frames'.format(
             info.width, info.height, info.fps, info.frame_count))
@@ -2532,6 +2547,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             cls._instance = None
             return cls.show_ui(dockable=True)
         QtWidgets.QWidget.setVisible(window, True)
+        window._set_media_window_title()
         return window
 
     @classmethod
@@ -2590,6 +2606,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         else:
             window._apply_macos_tool_window()
             QtWidgets.QDialog.show(window)
+        window._set_media_window_title()
         window.raise_()
         window.activateWindow()
         return window
