@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>review.svg</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M2.263 12 C5.509 3.884 18.491 3.884 21.737 12 C18.491 20.116 5.509 20.116 2.263 12 Z" fill="none" stroke="#c3c3c3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M15.449 12 C15.449 13.905 13.905 15.449 12 15.449 C10.095 15.449 8.551 13.905 8.551 12 C8.551 10.095 10.095 8.551 12 8.551 C13.905 8.551 15.449 10.095 15.449 12 Z" fill="none" stroke="#c3c3c3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>media.svg</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M4.5 5.5 L19.5 5.5 C20.328 5.5 21 6.172 21 7 L21 17 C21 17.828 20.328 18.5 19.5 18.5 L4.5 18.5 C3.672 18.5 3 17.828 3 17 L3 7 C3 6.172 3.672 5.5 4.5 5.5 Z" fill="none" stroke="#c3c3c3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M9.701 8.808 L9.701 15.192 L15.103 12 Z" fill="#c3c3c3"/>
+  </g>
+</svg>

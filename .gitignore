@@ -1,0 +1,48 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Media, test exports, caches and local credentials
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.exr
+*.wav
+*.mp3
+*.log
+*.tmp
+*.bak
+*.sqlite
+*.db
+.env
+.env.*
+!*.env.example
+auth.json
+credentials.json
+secrets.json
+*.pem
+*.key
+
+# Studio/CI material not needed in source
+build/
+dist/
+*.egg-info/
