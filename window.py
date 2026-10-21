@@ -2589,7 +2589,3 @@ def shutdown_ui(delete_workspace=False):
     return clean
 
 
-# Modern public name. The legacy name remains valid for existing Maya shelves.
-FrameReviewWindow = FrameReviewerWindow
-# External shelves/scripts importing the old class continue to work.
-VideoCropperWindow = FrameReviewerWindow

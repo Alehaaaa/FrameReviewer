@@ -2,7 +2,7 @@
 
 A media review and crop tool for Autodesk Maya, with frame-accurate FFmpeg playback, in/out marks, review annotations, animated crop tracking, and export.
 
-FrameReviewer is a Python package designed to live in Maya's scripts directory. It can also launch in a standalone Python environment with PySide2 or PySide6 for UI development.
+FrameReviewer is a Python package designed to live in Maya's scripts directory.
 
 ## Features
 
@@ -55,17 +55,7 @@ For existing installations, `VIDEOCROPPER_FFMPEG` and `VIDEOCROPPER_FFPROBE` are
 
 The package's `restore()` and `shutdown()` entrypoints manage Maya workspace controls and background workers. Use these entrypoints rather than deleting the widget directly.
 
-**Important:** The package import is lowercase `framereviewer`. Folder names on case-sensitive filesystems must match. The retired `VideoCropperWindow` class alias is preserved for integrations that import the class from this package, but external scripts that still do `import videocropper` should switch to `import framereviewer`.
-
-## Standalone UI
-
-With a compatible PySide binding installed in a development interpreter and this package's **parent directory** on `PYTHONPATH`:
-
-```bash
-python -m framereviewer
-```
-
-Maya docking and Maya timeline synchronization are only available in Maya.
+**Important:** The package import is lowercase `framereviewer`. Folder names on case-sensitive filesystems must match. Existing shelf scripts that import `videocropper` or refer to `VideoCropperWindow` must be updated to `framereviewer` and `FrameReviewerWindow`.
 
 ## Review and tracking workflow
 

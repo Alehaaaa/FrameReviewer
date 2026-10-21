@@ -21,14 +21,13 @@ import path Maya stores, not only on the window class.
 from __future__ import absolute_import
 
 __version__ = '3.0.0'
-__all__ = ['show', 'restore', 'shutdown', 'reload',
-           'FrameReviewerWindow', 'FrameReviewWindow', 'VideoCropperWindow']
+__all__ = ['show', 'restore', 'shutdown', 'reload', 'FrameReviewerWindow']
 
 
 def show():
     """Create (or re-create) and raise the FrameReviewer window."""
-    from .window import FrameReviewWindow
-    return FrameReviewWindow.show_ui()
+    from .window import FrameReviewerWindow
+    return FrameReviewerWindow.show_ui()
 
 
 def restore():
@@ -38,8 +37,8 @@ def restore():
     (and whenever Maya rebuilds the retained control). Must not raise: a throw
     here leaves the docked panel empty.
     """
-    from .window import FrameReviewWindow
-    return FrameReviewWindow.restore_ui()
+    from .window import FrameReviewerWindow
+    return FrameReviewerWindow.restore_ui()
 
 
 def shutdown(delete_workspace=False):
@@ -83,12 +82,6 @@ def reload():
 
 def __getattr__(name):  # lazy, so importing the package never forces Qt early
     if name == 'FrameReviewerWindow':
-        from . import window
-        return getattr(window, 'FrameReviewerWindow', window.FrameReviewWindow)
-    if name == 'FrameReviewWindow':
-        from .window import FrameReviewWindow
-        return FrameReviewWindow
-    if name == 'VideoCropperWindow':
-        from .window import VideoCropperWindow
-        return VideoCropperWindow
+        from .window import FrameReviewerWindow
+        return FrameReviewerWindow
     raise AttributeError(name)
