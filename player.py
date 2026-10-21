@@ -17,6 +17,12 @@ from .frames import SequenceSource, FramePump
 from .rolling_cache import VideoFrameSource
 
 
+# Keep a source alive if a decoder thread misses the shutdown deadline. Maya
+# may destroy its owning window even when callers correctly return False, and
+# abandoning the last Python reference can otherwise dispose of a live QThread.
+_PENDING_SOURCE_SHUTDOWNS = set()
+
+
 class Player(QtCore.QObject):
     frameChanged = Signal(int)
     playingChanged = Signal(bool)
@@ -702,6 +708,14 @@ class Player(QtCore.QObject):
         stopped = True
         source = self._source
         self._source = None
+        # Retry older sources across subsequent stop/load/reload attempts. The
+        # previous shutdown may have returned False while FFmpeg was exiting.
+        for pending_source in tuple(_PENDING_SOURCE_SHUTDOWNS):
+            if pending_source.shutdown() is False:
+                stopped = False
+            else:
+                _PENDING_SOURCE_SHUTDOWNS.discard(pending_source)
+                pending_source.deleteLater()
         if source is not None:
             try:
                 source.frameAvailable.disconnect(self._on_frame_available)
@@ -713,10 +727,13 @@ class Player(QtCore.QObject):
             except (RuntimeError, TypeError):
                 pass
             if source.shutdown() is False:
-                # A decode worker would not stop in time. Its callbacks still
-                # reference this source, so deleting it now would crash when they
-                # fire; leak it deliberately -- reload() already refuses to purge
-                # modules on a non-clean stop.
+                # Preserve a strong reference beyond the lifetime of the Maya
+                # window; a later stop_all() will retry and delete it only when
+                # every decode thread is actually finished.
+                _PENDING_SOURCE_SHUTDOWNS.add(source)
+                app = QtCore.QCoreApplication.instance()
+                if app is not None:
+                    source.setParent(app)
                 stopped = False
             else:
                 source.deleteLater()

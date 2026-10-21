@@ -9,6 +9,8 @@
 - Corrected crop, annotation and tracking overlay behavior under image flips.
 - Improved rolling FFmpeg decoding, cache reuse and end-of-range behavior.
 - Improved audio playback for FFmpeg fallback in Maya's Qt5 environment and seek/loop synchronization.
+- Coalesced rapid manual seeks, used the audio clock to keep playback smooth during video cache misses, and deferred Qt multimedia teardown beyond sender callbacks.
+- Throttled Maya timeline synchronization to avoid evaluation feedback during Play, and retained running workers across interrupted shutdown/reload until they can be stopped safely.
 
 ## 3.0.0
 

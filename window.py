@@ -86,6 +86,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.info = None
         self._closed = False
         self._shutting_down = False
+        self._shutdown_clean = None
+        self._shutdown_pending_jobs = []
         self._markers = set()
 
         # The one persisted-state store, created before any widget so their
@@ -2432,8 +2434,30 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
     def shutdown(self):
         """Idempotently stop every callback, process and worker owned by the UI."""
-        if self._closed or self._shutting_down:
-            return True
+        if self._shutting_down:
+            return False
+        if self._closed:
+            if self._shutdown_clean:
+                return True
+            # First teardown may time out while a decoder is exiting. Keep
+            # references and recheck on subsequent shutdown/reload calls.
+            self._shutting_down = True
+            try:
+                pending = self._shutdown_pending_jobs
+                self._shutdown_pending_jobs = []
+                clean = True
+                for job in pending:
+                    stopped = self._stop_thread(job)
+                    if not stopped:
+                        self._shutdown_pending_jobs.append(job)
+                    clean = clean and stopped
+                clean = bool(self.player.shutdown()) and clean
+                self._shutdown_clean = clean
+                if clean and type(self)._instance is self:
+                    type(self)._instance = None
+                return clean
+            finally:
+                self._shutting_down = False
         self._shutting_down = True
         clean = True
         try:
@@ -2455,7 +2479,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
             tracking_job = self._tracking_job
             self._cancel_tracking_job()
-            clean = self._stop_thread(tracking_job) and clean
+            if not self._stop_thread(tracking_job):
+                self._shutdown_pending_jobs.append(tracking_job)
+                clean = False
 
             export_job = self._export_job
             self._export_job = None
@@ -2466,18 +2492,23 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                         signal.disconnect()
                     except (RuntimeError, TypeError):
                         pass
-            clean = self._stop_thread(export_job, 3500) and clean
+            if not self._stop_thread(export_job, 3500):
+                self._shutdown_pending_jobs.append(export_job)
+                clean = False
             if getattr(self, 'shotgrid_panel', None) is not None:
                 clean = bool(self.shotgrid_panel.shutdown()) and clean
             clean = bool(self.player.shutdown()) and clean
         finally:
-            if type(self)._instance is self:
+            self._shutdown_clean = clean
+            if clean and type(self)._instance is self:
                 type(self)._instance = None
             self._shutting_down = False
         return clean
 
     def closeEvent(self, event):
-        self.shutdown()
+        if not self.shutdown():
+            event.ignore()
+            return
         QtWidgets.QDialog.closeEvent(self, event)
 
     def dockCloseEventTriggered(self):
@@ -2488,6 +2519,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
     def restore_ui(cls):
         """Rebuild the widget into Maya's current restored workspace control."""
         instance = getattr(cls, '_instance', None)
+        if instance is not None and getattr(instance, '_shutdown_clean', None) is False:
+            raise RuntimeError(
+                'FrameReviewer cannot be restored while background workers '
+                'are still stopping. Retry shutdown after they exit.')
         if instance is not None and not getattr(instance, '_closed', True):
             return instance
         window = cls(parent=maya_main_window())
@@ -2502,6 +2537,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
     @classmethod
     def show_ui(cls, dockable=True, area='right', floating=True):
         instance = getattr(cls, '_instance', None)
+        if instance is not None and getattr(instance, '_shutdown_clean', None) is False:
+            raise RuntimeError(
+                'FrameReviewer is shutting down background workers. '
+                'A new window cannot be opened until shutdown is complete.')
         if instance is not None and not getattr(instance, '_closed', True):
             try:
                 instance.show()
