@@ -196,6 +196,19 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._current_flip_h = self.act_flip_h.isChecked()
         self._current_flip_v = self.act_flip_v.isChecked()
         self._connect_preference_saving()
+        # Restore persisted onion settings after UI wiring; these settings are
+        # display-only and never modify the exported annotation data.
+        for control, setting in (
+                (self.onion_enable, self.settings.get_bool('onion/enabled', False)),
+                (self.onion_before, self.settings.get_int('onion/before', 2)),
+                (self.onion_after, self.settings.get_int('onion/after', 2)),
+                (self.onion_opacity, self.settings.get_int('onion/opacity', 35)),
+                (self.onion_falloff, self.settings.get_bool('onion/falloff', True)),
+                (self.onion_tint, self.settings.get_bool('onion/tint', True))):
+            control.blockSignals(True)
+            control.setChecked(setting) if isinstance(control, QtWidgets.QCheckBox) else control.setValue(setting)
+            control.blockSignals(False)
+        self._update_onion_skin()
         self._set_enabled(False)
         self.surface.set_placeholder_visible(True)
 
@@ -826,6 +839,37 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.drawing_lbl = QtWidgets.QLabel('No drawing on this frame')
         self.drawing_lbl.setWordWrap(True)
         keys.addWidget(self.drawing_lbl)
+        onion = section(draw_page, 'Onion Skin')
+        self.onion_enable = QtWidgets.QCheckBox('Show neighboring notes')
+        onion.addWidget(self.onion_enable)
+        depth_row = QtWidgets.QHBoxLayout()
+        self.onion_before = QtWidgets.QSpinBox()
+        self.onion_after = QtWidgets.QSpinBox()
+        for control in (self.onion_before, self.onion_after):
+            control.setRange(0, 20)
+            control.setValue(2)
+        depth_row.addWidget(QtWidgets.QLabel('Previous keys'))
+        depth_row.addWidget(self.onion_before)
+        depth_row.addWidget(QtWidgets.QLabel('Next keys'))
+        depth_row.addWidget(self.onion_after)
+        onion.addLayout(depth_row)
+        opacity_row = QtWidgets.QHBoxLayout()
+        self.onion_opacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.onion_opacity.setRange(0, 100)
+        self.onion_opacity.setValue(35)
+        self.onion_opacity_label = QtWidgets.QLabel('35%')
+        opacity_row.addWidget(QtWidgets.QLabel('Opacity'))
+        opacity_row.addWidget(self.onion_opacity, 1)
+        opacity_row.addWidget(self.onion_opacity_label)
+        onion.addLayout(opacity_row)
+        self.onion_falloff = QtWidgets.QCheckBox('Fade distant keys')
+        self.onion_falloff.setChecked(True)
+        onion.addWidget(self.onion_falloff)
+        self.onion_tint = QtWidgets.QCheckBox('Color previous / next')
+        self.onion_tint.setChecked(True)
+        onion.addWidget(self.onion_tint)
+        onion.addWidget(hint('Previous keys are warm; next keys are cool. '
+                            'Held notes remain editable only on their own key.'))
         draw_page.addWidget(hint(
             'Notes hold forward until the next annotated frame.'))
         draw_page.addStretch(1)
@@ -1191,6 +1235,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.undo_drawing_btn.clicked.connect(self.surface.undo_drawing_stroke)
         self.prev_drawing_btn.clicked.connect(lambda: self._step_drawing(-1))
         self.next_drawing_btn.clicked.connect(lambda: self._step_drawing(1))
+        for control in (self.onion_enable, self.onion_falloff, self.onion_tint):
+            control.toggled.connect(self._update_onion_skin)
+        for control in (self.onion_before, self.onion_after, self.onion_opacity):
+            control.valueChanged.connect(self._update_onion_skin)
         self.import_notes_btn.clicked.connect(self._import_notes)
         self.export_notes_btn.clicked.connect(self._export_notes)
         self.surface.drawingChanged.connect(self._on_drawing_changed)
@@ -1910,6 +1958,25 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                       [frame for frame in frames if frame > current])
         if candidates:
             self._scrub(max(candidates) if direction < 0 else min(candidates))
+
+    def _update_onion_skin(self, *_):
+        value = self.onion_opacity.value()
+        self.onion_opacity_label.setText('{}%'.format(value))
+        self.surface.set_onion_skin(
+            enabled=self.onion_enable.isChecked(),
+            before=self.onion_before.value(),
+            after=self.onion_after.value(),
+            opacity=value / 100.0,
+            falloff=self.onion_falloff.isChecked(),
+            tint=self.onion_tint.isChecked())
+        for key, setting in (
+                ('enabled', self.onion_enable.isChecked()),
+                ('before', self.onion_before.value()),
+                ('after', self.onion_after.value()),
+                ('opacity', value),
+                ('falloff', self.onion_falloff.isChecked()),
+                ('tint', self.onion_tint.isChecked())):
+            self.settings.set('onion/' + key, setting)
 
     def _notes_directory(self):
         if self.info is not None and self.info.path:
