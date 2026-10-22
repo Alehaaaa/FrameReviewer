@@ -14,6 +14,8 @@ import html
 import json
 import os
 import shutil
+import tempfile
+import glob
 import sys
 
 from .qtcompat import (QtCore, QtGui, QtWidgets, Signal, QAction, QActionGroup, QShortcut,
@@ -463,7 +465,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 break
 
     def _icon(self, name):
-        return QtGui.QIcon(os.path.join(ICON_DIR, '{}.svg'.format(name)))
+        return QtGui.QIcon(os.path.join(ICON_DIR, '{}.png'.format(name)))
 
     def _build_menu(self):
         bar = QtWidgets.QMenuBar(self)
@@ -488,7 +490,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             return act
 
         file_menu = bar.addMenu('File')
+        self.act_open = action(file_menu, 'Open…', self._choose_open, shortcut='Ctrl+O')
         self.act_import = action(file_menu, 'Import Media…', self._choose_media, shortcut='I')
+        action(file_menu, 'Playblast Current Shot', self._playblast_current_shot)
         self.recent_menu = file_menu.addMenu('Recent Media')
         self.recent_menu.aboutToShow.connect(self._populate_recent_menu)
         self._populate_recent_menu()  # build once so it is never empty on show
@@ -1247,6 +1251,39 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self._shortcuts.append(shortcut)
 
     # --------------------------------------------------------- media load
+    def _choose_open(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Open media or review', self._notes_directory(),
+            'Media / FrameReviewer Notes (*.json *.mp4 *.mov *.mkv *.webm *.avi *.m4v *.jpg *.jpeg *.png *.tga *.exr);;All files (*)')
+        if path:
+            self._load_path(path)
+
+    def _playblast_current_shot(self):
+        """Capture Maya's active camera/time-slider range as a JPEG sequence."""
+        if cmds is None:
+            QtWidgets.QMessageBox.warning(self, 'Playblast unavailable', 'Maya is required.')
+            return
+        if self._closed or (self._export_job is not None and self._export_job.isRunning()):
+            return
+        folder = tempfile.mkdtemp(prefix='framereviewer_playblast_')
+        prefix = os.path.join(folder, 'shot')
+        try:
+            # Maya's image playblast is portable across Linux, macOS and Windows;
+            # FrameReviewer already supports numbered image sequences.
+            result = cmds.playblast(
+                format='image', compression='jpg', filename=prefix,
+                forceOverwrite=True, viewer=False, showOrnaments=False,
+                offScreen=True, percent=100, quality=90, clearCache=True,
+                sequenceTime=False)
+            files = sorted(glob.glob(prefix + '*.jpg') + glob.glob(prefix + '*.jpeg'))
+            if not files and result:
+                files = sorted(glob.glob(os.path.splitext(str(result))[0] + '*.jpg'))
+            if not files:
+                raise RuntimeError('Maya did not create playblast frames.')
+            self._load_path(files[0])
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, 'Playblast failed', str(exc))
+
     def _choose_media(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Import media', os.path.expanduser('~'),
@@ -1297,6 +1334,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
     def _load_path(self, path):
         """Shared entry point for the file dialog, the placeholder, and drops."""
+        if path.lower().endswith('.json'):
+            self._open_notes_path(path)
+            return
         if self._closed or (self._export_job is not None and self._export_job.isRunning()):
             return
         try:
@@ -1900,6 +1940,57 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.status_lbl.setText(
             'Exported {} annotation key{}.'.format(
                 len(drawings), '' if len(drawings) == 1 else 's'))
+
+    def _open_notes_path(self, path):
+        """Restore the media and annotations recorded in a notes JSON."""
+        if self._closed or (self._export_job is not None and self._export_job.isRunning()):
+            return
+        try:
+            if os.path.getsize(path) > 20 * 1024 * 1024:
+                raise ValueError('The notes file is larger than 20 MB.')
+            with open(path, 'r') as stream:
+                payload = json.load(stream)
+            if not isinstance(payload, dict) or payload.get('format') != 'frame-review-notes':
+                raise ValueError('This is not a FrameReviewer notes file.')
+            if int(payload.get('version', 0)) != 1:
+                raise ValueError('Unsupported notes file version.')
+            source = payload.get('source')
+            if not isinstance(source, dict) or not isinstance(source.get('path'), str) or not source['path'].strip():
+                raise ValueError('The notes file has no source media path.')
+            entries = payload.get('notes', [])
+            if not isinstance(entries, list):
+                raise ValueError('The notes field must be a list.')
+            drawings = {}
+            for entry in entries:
+                if not isinstance(entry, dict) or 'frame' not in entry:
+                    raise ValueError('Invalid annotation entry.')
+                frame = int(entry['frame'])
+                if frame < 0 or frame in drawings:
+                    raise ValueError('Invalid or duplicate frame.')
+                strokes = entry.get('strokes', [])
+                if not isinstance(strokes, list):
+                    raise ValueError('Invalid annotation strokes.')
+                drawings[frame] = strokes
+            original = os.path.expanduser(os.path.expandvars(source['path']))
+            folder = os.path.dirname(os.path.abspath(path))
+            paths = ([os.path.join(folder, original)] if not os.path.isabs(original) else [])
+            paths += [original, os.path.join(folder, os.path.basename(original))]
+            media = next((candidate for candidate in paths if os.path.isfile(candidate)), None)
+            if media is None:
+                raise IOError('Source media missing: ' + source['path'])
+            info = ffmpegtools.probe(self.ffprobe, QtGui.QImageReader, media)
+        except (IOError, OSError, TypeError, ValueError, KeyError, OverflowError) as exc:
+            QtWidgets.QMessageBox.critical(self, 'Open notes failed', str(exc))
+            return
+        self._load(info)
+        try:
+            self.surface.set_drawing_data(drawings, replace=True)
+        except (TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, 'Open notes failed', str(exc))
+            return
+        self._remember_recent(path)
+        self.status_lbl.setText('Opened {} with {} note keys.'.format(
+            os.path.basename(media), len(drawings)))
 
     def _import_notes(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
