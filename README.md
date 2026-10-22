@@ -9,6 +9,7 @@ FrameReviewer is a Python package designed to live in Maya's scripts directory.
 - Media playback for video clips and image sequences, including scrubbing, variable speed, marked-range looping, volume/mute, and a rolling FFmpeg frame cache.
 - Optional thumbnail and waveform timeline lanes, colored review-note keys, and independent frame bookmarks.
 - Review drawing tools (brush, eraser, rectangle, ellipse, and arrow), undo/redo, import/export of note JSON.
+- Notes Select tool: click or Shift-click individual strokes, drag a marquee to select multiple strokes, move by dragging the selection, scale using four corner handles (Shift locks the aspect ratio), and rotate using the top circular handle. Transforms modify stroke coordinates and participate in note undo/redo.
 - Onion skin for annotated keyframes, with independent previous/next depth (0–20), opacity (0–100%), optional distance falloff, warm/cool directional tinting, and persistent controls under Properties → Draw. Ghost strokes never modify exported notes.
 - **File → Open** (Ctrl+O) opens media or a FrameReviewer notes JSON, resolving the associated source clip and loading its annotations.
 - **File → Playblast Current Shot** captures the current Maya Camera Sequencer shot (or the playback range when no shot is active) as a temporary JPEG image sequence and immediately loads it.
