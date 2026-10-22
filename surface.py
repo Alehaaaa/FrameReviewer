@@ -82,6 +82,34 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._current_frame = 0
         self._drawings = {}
         self._drawing_items = []
+        self._selected_strokes = set()
+        self._selection_key = -1
+        self._selection_drag = None
+        self._selection_box = QtWidgets.QGraphicsRectItem()
+        self._selection_box.setZValue(35)
+        self._selection_box.setPen(QtGui.QPen(QtGui.QColor('#64c9ff'), 1, QtCore.Qt.DashLine))
+        self._selection_box.setBrush(QtCore.Qt.NoBrush)
+        self._selection_box.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.scene().addItem(self._selection_box)
+        self._selection_box.hide()
+        self._selection_handles = {}
+        for handle in ('nw', 'ne', 'sw', 'se', 'rotate'):
+            item = QtWidgets.QGraphicsEllipseItem()
+            item.setZValue(36)
+            item.setBrush(QtGui.QColor('#64c9ff') if handle != 'rotate'
+                          else QtGui.QColor('#f8c26b'))
+            item.setPen(QtGui.QPen(QtGui.QColor('#162632')))
+            item.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+            self.scene().addItem(item)
+            item.hide()
+            self._selection_handles[handle] = item
+        self._selection_marquee = QtWidgets.QGraphicsRectItem()
+        self._selection_marquee.setZValue(34)
+        self._selection_marquee.setPen(QtGui.QPen(QtGui.QColor('#64c9ff'), 1, QtCore.Qt.DashLine))
+        self._selection_marquee.setBrush(QtGui.QColor(100, 201, 255, 24))
+        self._selection_marquee.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.scene().addItem(self._selection_marquee)
+        self._selection_marquee.hide()
         self._onion_items = []
         self._onion_enabled = False
         self._onion_before = 2
@@ -402,10 +430,15 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
     def set_draw_mode(self, mode):
         mode = str(mode)
         self._draw_mode = mode if mode in (
-            'brush', 'eraser', 'rectangle', 'ellipse', 'arrow') else 'brush'
+            'select', 'brush', 'eraser', 'rectangle', 'ellipse', 'arrow') else 'brush'
+        self._update_selection_box()
         self._apply_draw_cursor()
 
     def set_current_frame(self, frame):
+        if int(frame) != self._current_frame:
+            self._selected_strokes.clear()
+            self._selection_key = -1
+            self._selection_drag = None
         self._current_frame = int(frame)
         self._rebuild_drawing_items()
 
@@ -543,6 +576,11 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         for stroke in strokes:
             item = self._make_stroke_item(stroke)
             self._drawing_items.append(item)
+        if self._selection_key != key:
+            self._selected_strokes.clear()
+        self._selection_key = key
+        self._selected_strokes.intersection_update(range(len(self._drawing_items)))
+        self._update_selection_box()
         self.drawingChanged.emit(len(self._drawing_items))
         self.activeAnnotationChanged.emit(key, len(self._drawing_items))
 
@@ -594,6 +632,138 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
                           for frame, strokes in dict(snapshot or {}).items()}
         self.annotationFramesChanged.emit(self.annotation_frame_colors())
         self._rebuild_drawing_items()
+
+    def _update_selection_box(self):
+        selected = [self._drawing_items[i] for i in sorted(self._selected_strokes)
+                    if i < len(self._drawing_items)]
+        visible = bool(selected) and self._tool == 'draw' and self._draw_mode == 'select'
+        self._selection_box.setVisible(visible)
+        for handle in self._selection_handles.values():
+            handle.setVisible(visible)
+        if not visible:
+            return
+        bounds = QtCore.QRectF(selected[0].sceneBoundingRect())
+        for item in selected[1:]:
+            bounds = bounds.united(item.sceneBoundingRect())
+        self._selection_box.setRect(bounds)
+        radius = 5.0 / max(0.001, abs(self.transform().m11()))
+        locations = {'nw': bounds.topLeft(), 'ne': bounds.topRight(),
+                     'sw': bounds.bottomLeft(), 'se': bounds.bottomRight(),
+                     'rotate': QtCore.QPointF(bounds.center().x(),
+                         bounds.top() - 25.0 / max(0.001, abs(self.transform().m11())))}
+        for name, point in locations.items():
+            self._selection_handles[name].setRect(
+                point.x()-radius, point.y()-radius, 2*radius, 2*radius)
+
+    def _selection_hit(self, point):
+        tolerance = 11.0 / max(0.001, abs(self.transform().m11()))
+        if self._selected_strokes:
+            for name, handle in self._selection_handles.items():
+                if handle.isVisible() and handle.rect().adjusted(
+                        -tolerance, -tolerance, tolerance, tolerance).contains(point):
+                    return name, None
+        for index in reversed(range(len(self._drawing_items))):
+            item = self._drawing_items[index]
+            local = item.mapFromScene(point)
+            if item.shape().contains(local) or item.sceneBoundingRect().adjusted(
+                    -tolerance, -tolerance, tolerance, tolerance).contains(point):
+                return 'stroke', index
+        return 'empty', None
+
+    def _selection_press(self, event):
+        point = self.mapToScene(event.pos())
+        action, index = self._selection_hit(point)
+        add = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+        if action == 'stroke':
+            if add:
+                if index in self._selected_strokes:
+                    self._selected_strokes.remove(index)
+                else:
+                    self._selected_strokes.add(index)
+                self._update_selection_box()
+                return
+            if index not in self._selected_strokes:
+                self._selected_strokes = {index}
+                self._update_selection_box()
+            action = 'move'
+        elif action == 'empty':
+            if not add:
+                self._selected_strokes.clear()
+                self._update_selection_box()
+            self._selection_drag = ('marquee', point, add, None, None)
+            self._selection_marquee.setRect(QtCore.QRectF(point, point))
+            self._selection_marquee.show()
+            return
+        if not self._selected_strokes:
+            return
+        key = self.active_drawing_frame()
+        originals = {i: self._copy_strokes([self._drawings[key][i]])[0]
+                     for i in self._selected_strokes}
+        box = QtCore.QRectF(self._selection_box.rect())
+        self._selection_drag = (action, point, False, originals, box)
+
+    def _selection_move(self, event):
+        if self._selection_drag is None:
+            return
+        action, origin, _add, originals, box = self._selection_drag
+        point = self.mapToScene(event.pos())
+        if action == 'marquee':
+            self._selection_marquee.setRect(QtCore.QRectF(origin, point).normalized())
+            return
+        import math
+        center = box.center()
+        if action == 'move':
+            transform = lambda x,y: (x+point.x()-origin.x(), y+point.y()-origin.y())
+        elif action == 'rotate':
+            a0 = math.atan2(origin.y()-center.y(), origin.x()-center.x())
+            a1 = math.atan2(point.y()-center.y(), point.x()-center.x())
+            angle = a1-a0
+            cs, sn = math.cos(angle), math.sin(angle)
+            transform = lambda x,y: (center.x()+(x-center.x())*cs-(y-center.y())*sn,
+                                     center.y()+(x-center.x())*sn+(y-center.y())*cs)
+        else:
+            opposite = {'nw': box.bottomRight(), 'ne': box.bottomLeft(),
+                        'sw': box.topRight(), 'se': box.topLeft()}[action]
+            sx = (point.x()-opposite.x()) / (origin.x()-opposite.x()) if abs(origin.x()-opposite.x()) > 0.0001 else 1.0
+            sy = (point.y()-opposite.y()) / (origin.y()-opposite.y()) if abs(origin.y()-opposite.y()) > 0.0001 else 1.0
+            if event.modifiers() & QtCore.Qt.ShiftModifier:
+                value = sx if abs(sx) >= abs(sy) else sy
+                sx = sy = value
+            transform = lambda x,y: (opposite.x()+(x-opposite.x())*sx,
+                                     opposite.y()+(y-opposite.y())*sy)
+        key = self._selection_key
+        if key not in self._drawings:
+            return
+        for index, stroke in originals.items():
+            edited = self._copy_strokes([stroke])[0]
+            edited['points'] = [(transform(float(x),float(y))[0],
+                                 transform(float(x),float(y))[1],p)
+                                for x,y,p in stroke.get('points', [])]
+            self._drawings[key][index] = edited
+        self._rebuild_drawing_items()
+
+    def _selection_release(self, event):
+        drag = self._selection_drag
+        self._selection_drag = None
+        if drag is None:
+            return
+        if drag[0] == 'marquee':
+            bounds = self._selection_marquee.rect()
+            self._selection_marquee.hide()
+            picked = {i for i,item in enumerate(self._drawing_items)
+                      if bounds.intersects(item.sceneBoundingRect())}
+            self._selected_strokes.update(picked)
+            self._update_selection_box()
+        else:
+            self._selection_move_final_notify(drag)
+
+    def _selection_move_final_notify(self, drag):
+        if drag[0] not in ('move','rotate','nw','ne','sw','se'):
+            return
+        key = self._selection_key
+        if key >= 0 and drag[3]:
+            self.annotationFramesChanged.emit(self.annotation_frame_colors())
+            self.edited.emit(key)
 
     def _make_stroke_item(self, stroke):
         group = QtWidgets.QGraphicsItemGroup()
@@ -1066,6 +1236,11 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             event.accept()
             return
         if (event.button() == QtCore.Qt.LeftButton and self._tool == 'draw'
+                and self._draw_mode == 'select' and not self._native.isEmpty()):
+            self._selection_press(event)
+            event.accept()
+            return
+        if (event.button() == QtCore.Qt.LeftButton and self._tool == 'draw'
                 and not self._native.isEmpty()):
             point = self.mapToScene(event.pos())
             self._start_stroke(
@@ -1094,6 +1269,10 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             delta = event.pos() - self._pan_last
             self._pan_last = event.pos()
             self._pan_by(delta.x(), delta.y())
+            event.accept()
+            return
+        if self._tool == 'draw' and self._draw_mode == 'select' and self._selection_drag:
+            self._selection_move(event)
             event.accept()
             return
         if self._tool == 'draw' and self._draw_mode == 'eraser':
@@ -1133,6 +1312,12 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         if self._panning and event.button() == QtCore.Qt.MiddleButton:
             self._panning = False
             self.viewport().unsetCursor()
+            event.accept()
+            return
+        if (event.button() == QtCore.Qt.LeftButton and self._selection_drag
+                and self._tool == 'draw' and self._draw_mode == 'select'):
+            self._selection_move(event)
+            self._selection_release(event)
             event.accept()
             return
         if self._active_points:
