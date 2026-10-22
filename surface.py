@@ -135,7 +135,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         icon = QtWidgets.QLabel()
         icon.setAlignment(QtCore.Qt.AlignCenter)
         icon.setFixedSize(112, 112)
-        icon.setPixmap(QtGui.QIcon(os.path.join(icons, 'placeholder.svg')).pixmap(104, 104))
+        icon.setPixmap(QtGui.QIcon(os.path.join(icons, 'placeholder.png')).pixmap(104, 104))
         layout.addWidget(icon, 0, QtCore.Qt.AlignCenter)
 
         title = QtWidgets.QLabel('Drop a video to review')
@@ -155,7 +155,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         button = QtWidgets.QPushButton('Import Media…')
         button.setCursor(QtCore.Qt.PointingHandCursor)
         button.setFixedSize(180, 34)
-        button.setIcon(QtGui.QIcon(os.path.join(icons, 'media.svg')))
+        button.setIcon(QtGui.QIcon(os.path.join(icons, 'media.png')))
         button.clicked.connect(self.importRequested.emit)
         layout.addWidget(button, 0, QtCore.Qt.AlignCenter)
         frame.adjustSize()
