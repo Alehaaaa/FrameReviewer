@@ -70,6 +70,22 @@ class VolumeButton(QtWidgets.QToolButton):
         QtWidgets.QToolButton.mouseDoubleClickEvent(self, event)
 
 
+class CompactStack(QtWidgets.QStackedWidget):
+    """A stack whose layout follows the current page, not its largest page."""
+
+    def __init__(self, parent=None):
+        QtWidgets.QStackedWidget.__init__(self, parent)
+        self.currentChanged.connect(lambda *_: self.updateGeometry())
+
+    def sizeHint(self):
+        page = self.currentWidget()
+        return page.sizeHint() if page is not None else QtCore.QSize()
+
+    def minimumSizeHint(self):
+        page = self.currentWidget()
+        return page.minimumSizeHint() if page is not None else QtCore.QSize()
+
+
 class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
     _instance = None
     _object_name = 'FramestoreFrameReviewer'
@@ -134,6 +150,16 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._draw_tool_sizes = {
             'brush': 6, 'eraser': 24,
             'rectangle': 3, 'ellipse': 3, 'arrow': 3}
+        # Shared by the main Tools menu, tool rail and its context menu.
+        self._tool_specs = (
+            ('media', 'Media', 'Media and source information (V)'),
+            ('crop', 'Crop', 'Crop tool (C)'),
+            ('draw', 'Draw', 'Draw review annotations (D)'),
+            ('track', 'Track', 'Track the crop forward (T)'),
+            ('review', 'Review', 'Review overlays and display tools (R)'),
+            ('export', 'Export', 'Export and output settings (X)'),
+            ('shotgrid', 'Flow / ShotGrid', 'Flow / ShotGrid review versions (G)'),
+        )
 
         self.surface = PlaybackSurface()
         self._build_ui()
@@ -155,15 +181,35 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             QWidget#vcSide QToolButton:checked, QWidget#vcSide QToolButton:pressed {{
                 background: {down}; border-color: {border}; }}
             QWidget#vcSide QPushButton {{ background: {control}; color: {text};
-                border: 1px solid {border}; border-radius: 3px; padding: 3px 10px; }}
+                border: 1px solid {border}; border-radius: 4px;
+                min-height: 26px; padding: 2px 10px; }}
             QWidget#vcSide QPushButton:hover {{ background: {hover}; }}
             QWidget#vcSide QPushButton:pressed {{ background: {down}; }}
             QWidget#vcSide QPushButton:disabled {{ color: {dim}; }}
+            QWidget#vcSide QPushButton[role="primary"] {{ background: #4b555c;
+                color: {text}; border-color: #596b77; font-weight: bold; }}
+            QWidget#vcSide QPushButton[role="primary"]:hover {{ background: #53616a; }}
+            QWidget#vcSide QPushButton[role="danger"] {{ background: #554545;
+                color: #cbbbbb; border-color: #684b4b; }}
+            QWidget#vcSide QPushButton[role="danger"]:hover {{ background: #604b4b; }}
+            QWidget#vcSide QToolButton[toolMode="true"] {{ background: {control};
+                border: 1px solid {border}; border-radius: 4px; }}
+            QWidget#vcSide QToolButton[toolMode="true"]:hover {{ background: {hover}; }}
+            QWidget#vcSide QToolButton[toolMode="true"]:checked {{
+                background: #465159; border-color: #596f7d; }}
             QWidget#vcSide QStackedWidget, QWidget#vcSide QScrollArea {{
                 background: transparent; border: none; }}
             QWidget#vcSide #vcPageBody {{ background: transparent; }}
-            QWidget#vcSide QFrame#vcCard {{ background: {panel}; border-radius: 5px; }}
+            QWidget#vcSide QFrame#vcCard {{ background: {panel};
+                border: 1px solid {border}; border-radius: 6px; }}
             QLabel#vcCardTitle {{ color: {dim}; font-weight: bold; }}
+            QToolButton#vcDisclosure {{ color: {text}; font-weight: bold;
+                border: none; padding: 2px 0; text-align: left; }}
+            QWidget#vcSide QToolButton#vcDisclosure:hover,
+            QWidget#vcSide QToolButton#vcDisclosure:checked,
+            QWidget#vcSide QToolButton#vcDisclosure:pressed {{
+                color: {text}; background: transparent; border: none; }}
+            QLabel#vcToolSubtitle {{ color: {dim}; padding-left: 6px; }}
             QLabel[dim="true"] {{ color: {dim}; }}
         '''.format(panel=style.PANEL, border=style.BORDER, hover=style.CONTROL_HOVER,
                    accent=style.ACCENT, accent_hi=style.ACCENT_HI, control=style.CONTROL,
@@ -206,7 +252,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 (self.onion_falloff, self.settings.get_bool('onion/falloff', True)),
                 (self.onion_tint, self.settings.get_bool('onion/tint', True))):
             control.blockSignals(True)
-            control.setChecked(setting) if isinstance(control, QtWidgets.QCheckBox) else control.setValue(setting)
+            if isinstance(control, QtWidgets.QCheckBox):
+                control.setChecked(setting)
+            else:
+                control.setValue(setting)
             control.blockSignals(False)
         self._update_onion_skin()
         self._set_enabled(False)
@@ -402,16 +451,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._tool_buttons = {}
         self._tool_group = QtWidgets.QButtonGroup(self)
         self._tool_group.setExclusive(True)
-        # (key, name, tooltip) -- name labels the right-click "Tools" menu.
-        self._tool_specs = (
-            ('media', 'Media', 'Media and source information (V)'),
-            ('crop', 'Crop', 'Crop tool (C)'),
-            ('draw', 'Draw', 'Draw review annotations (B)'),
-            ('track', 'Track', 'Track the crop forward (T)'),
-            ('review', 'Review', 'Review overlays and display tools (R)'),
-            ('export', 'Export', 'Export and output settings (E)'),
-            ('shotgrid', 'Flow / ShotGrid', 'Flow / ShotGrid review versions (G)'),
-        )
         for key, _name, tooltip in self._tool_specs:
             button = QtWidgets.QToolButton()
             button.setObjectName('vcToolButton')
@@ -494,7 +533,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             act.setCheckable(checkable)
             act.setChecked(checked)
             if shortcut:
-                act.setShortcut(QtGui.QKeySequence(shortcut))
+                shortcuts = shortcut if isinstance(shortcut, (tuple, list)) else (shortcut,)
+                act.setShortcuts([QtGui.QKeySequence(value) for value in shortcuts])
+                act.setShortcutContext(QtCore.Qt.WidgetWithChildrenShortcut)
             if slot is not None:
                 if checkable:
                     act.toggled.connect(slot)
@@ -504,50 +545,51 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             menu.addAction(act)
             return act
 
+        # Conventional top-level order: project I/O, editing, playback,
+        # presentation, tools, then help. This keeps pointer travel predictable
+        # and avoids splitting related display options across Review/Window.
         file_menu = bar.addMenu('File')
-        self.act_open = action(file_menu, 'Open…', self._choose_open, shortcut='Ctrl+O')
-        self.act_import = action(file_menu, 'Import Media…', self._choose_media, shortcut='I')
-        action(file_menu, 'Playblast Current Shot', self._playblast_current_shot)
+        self.act_open = action(file_menu, 'Open Media or Review…', self._choose_open,
+                               shortcut='Ctrl+O')
         self.recent_menu = file_menu.addMenu('Recent Media')
         self.recent_menu.aboutToShow.connect(self._populate_recent_menu)
         self._populate_recent_menu()  # build once so it is never empty on show
+        file_menu.addSeparator()
+        self.act_import = action(file_menu, 'Import Media…', self._choose_media, shortcut='I')
+        action(file_menu, 'Playblast Current Shot…', self._playblast_current_shot)
+        notes_menu = file_menu.addMenu('Review Notes')
+        action(notes_menu, 'Import Notes…', self._import_notes)
+        action(notes_menu, 'Export Notes…', self._export_notes)
+        file_menu.addSeparator()
         self.act_export = action(file_menu, 'Export Media…', self._export, shortcut='Ctrl+E')
         file_menu.addSeparator()
-        action(file_menu, 'Close', self.close)
+        action(file_menu, 'Close FrameReviewer', self.close, shortcut='Ctrl+W')
 
-        review_menu = bar.addMenu('Review')
-        self.act_thumbs = action(review_menu, 'Thumbnail Timeline', self._toggle_thumbnails, checkable=True, checked=True)
-        self.act_wave = action(review_menu, 'Audio Waveform', self._toggle_waveform, checkable=True, checked=True)
-        self.act_onion = action(review_menu, 'Onion Skin', self._toggle_onion, checkable=True, shortcut='Ctrl+Shift+O')
-        review_menu.addSeparator()
-        self.act_crop = action(review_menu, 'Crop Overlay', self.surface.set_crop_visible,
-                               checkable=True, checked=True)
-        self.act_flip_h = action(review_menu, 'Flip Horizontally', self._on_flip_changed,
-                                 checkable=True, shortcut='Shift+X')
-        self.act_flip_v = action(review_menu, 'Flip Vertically', self._on_flip_changed,
-                                 checkable=True, shortcut='Shift+Y')
-
-        window_menu = bar.addMenu('Window')
-        self.act_toolbar = action(window_menu, 'Toolbar', self._toggle_toolbar,
-                                  checkable=True, checked=True)
-        self.act_side = action(window_menu, 'Properties', self._toggle_side,
-                               checkable=True, checked=False)
-        window_menu.addSeparator()
-        self.act_timeline = action(window_menu, 'Timeline', self._toggle_timeline,
-                                   checkable=True, checked=True)
-        self.act_transport = action(window_menu, 'Playback Controls', self._toggle_transport,
-                                    checkable=True, checked=True)
-        self.act_statusbar = action(window_menu, 'Status Bar', self._toggle_statusbar,
-                                    checkable=True, checked=True)
-        window_menu.addSeparator()
-        self.act_fullscreen = action(window_menu, 'Full Screen', self._toggle_fullscreen,
-                                     checkable=True, checked=False, shortcut='F11')
+        edit_menu = bar.addMenu('Edit')
+        self.act_undo = action(edit_menu, 'Undo', self._undo_action,
+                               shortcut=('Ctrl+Z', 'Z'))
+        self.act_redo = action(edit_menu, 'Redo', self._redo_action,
+                               shortcut=('Ctrl+Shift+Z', 'Ctrl+Y'))
+        edit_menu.addSeparator()
+        action(edit_menu, 'Delete Selected Notes', self.surface.delete_selected_strokes)
+        action(edit_menu, 'Clear Notes on Current Frame', self.surface.clear_current_drawing)
+        action(edit_menu, 'Create Blank Annotation Frame', self.surface.create_blank_drawing)
+        action(edit_menu, 'Delete All Notes…', self._delete_all_notes)
+        edit_menu.addSeparator()
+        action(edit_menu, 'Reset Preferences…', self._reset_preferences)
 
         play_menu = bar.addMenu('Playback')
+        action(play_menu, 'Play / Pause', lambda: self.player.toggle(), shortcut='Space')
+        action(play_menu, 'Previous Frame', lambda: self._scrub(self.player.current_frame - 1),
+               shortcut='Left')
+        action(play_menu, 'Next Frame', lambda: self._scrub(self.player.current_frame + 1),
+               shortcut='Right')
+        play_menu.addSeparator()
         self.act_loop = action(play_menu, 'Loop', self.player_set_loop, checkable=True,
                                shortcut='L')
-        action(play_menu, 'Mark In  [', self._mark_in)
-        action(play_menu, 'Mark Out  ]', self._mark_out)
+        action(play_menu, 'Set In Point', self._mark_in, shortcut='[')
+        action(play_menu, 'Set Out Point', self._mark_out, shortcut=']')
+        action(play_menu, 'Reset In / Out', self._reset_marked_range, shortcut='Shift+R')
         markers_menu = play_menu.addMenu('Frame Markers')
         self.act_toggle_marker = action(
             markers_menu, 'Toggle Marker', self._toggle_frame_marker, shortcut='M')
@@ -572,10 +614,54 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             speed_menu.addAction(act)
             self.speed_actions[value] = act
 
+        view_menu = bar.addMenu('View')
+        action(view_menu, 'Fit Media to View', self.surface.fit_view, shortcut='F')
+        action(view_menu, 'Zoom In', lambda: self.surface.zoom_by(1.25), shortcut='Ctrl++')
+        action(view_menu, 'Zoom Out', lambda: self.surface.zoom_by(0.8), shortcut='Ctrl+-')
+        self.act_fullscreen = action(view_menu, 'Full Screen', self._toggle_fullscreen,
+                                     checkable=True, checked=False, shortcut='F11')
+        view_menu.addSeparator()
+        self.act_toolbar = action(view_menu, 'Tool Rail', self._toggle_toolbar,
+                                  checkable=True, checked=True)
+        self.act_side = action(view_menu, 'Properties Panel', self._toggle_side,
+                               checkable=True, checked=False)
+        self.act_timeline = action(view_menu, 'Timeline', self._toggle_timeline,
+                                   checkable=True, checked=True)
+        self.act_transport = action(view_menu, 'Playback Controls', self._toggle_transport,
+                                    checkable=True, checked=True)
+        self.act_statusbar = action(view_menu, 'Status Bar', self._toggle_statusbar,
+                                    checkable=True, checked=True)
+        view_menu.addSeparator()
+        self.act_thumbs = action(view_menu, 'Timeline Thumbnails', self._toggle_thumbnails,
+                                 checkable=True, checked=True)
+        self.act_wave = action(view_menu, 'Audio Waveform', self._toggle_waveform,
+                               checkable=True, checked=True)
+        self.act_onion = action(view_menu, 'Neighboring Notes (Onion Skin)',
+                                self._toggle_onion, checkable=True,
+                                shortcut='Ctrl+Shift+O')
+        self.act_crop = action(view_menu, 'Crop Overlay', self.surface.set_crop_visible,
+                               checkable=True, checked=True)
+        view_menu.addSeparator()
+        self.act_flip_h = action(view_menu, 'Flip Horizontally', self._on_flip_changed,
+                                 checkable=True, shortcut='Shift+X')
+        self.act_flip_v = action(view_menu, 'Flip Vertically', self._on_flip_changed,
+                                 checkable=True, shortcut='Shift+Y')
+
+        tools_menu = bar.addMenu('Tools')
+        for key, name, tooltip in self._tool_specs:
+            shortcut = {'media': 'V', 'crop': 'C', 'draw': 'D', 'track': 'T',
+                        'review': 'R', 'export': 'X', 'shotgrid': 'G'}[key]
+            act = action(tools_menu, name, lambda selected=key: self._show_tool(selected),
+                         shortcut=shortcut)
+            act.setToolTip(tooltip)
+        tools_menu.addSeparator()
+        action(tools_menu, 'Brush', lambda: self._activate_draw_mode('brush'),
+               shortcut='B')
+        action(tools_menu, 'Eraser', lambda: self._activate_draw_mode('eraser'),
+               shortcut='E')
+
         help_menu = bar.addMenu('Help')
         action(help_menu, 'About FrameReviewer', self._about)
-        help_menu.addSeparator()
-        action(help_menu, 'Reset Preferences...', self._reset_preferences)
         return bar
 
     def _build_side(self):
@@ -584,10 +670,11 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         side.setMinimumWidth(270)
         side.setMaximumWidth(380)
         column = QtWidgets.QVBoxLayout(side)
-        column.setContentsMargins(10, 8, 10, 8)
-        column.setSpacing(8)
+        column.setContentsMargins(8, 6, 8, 6)
+        column.setSpacing(5)
 
         header = QtWidgets.QHBoxLayout()
+        header.setSpacing(2)
         self.tool_title = QtWidgets.QLabel('MEDIA')
         title_font = self.tool_title.font()
         title_font.setBold(True)
@@ -596,14 +683,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         close.setText('×')
         close.setToolTip('Close tool pane')
         close.clicked.connect(lambda: self.act_side.setChecked(False))
-        header.addWidget(self.tool_title, 1)
+        self.tool_subtitle = QtWidgets.QLabel('Source and clip information')
+        self.tool_subtitle.setObjectName('vcToolSubtitle')
+        self.tool_subtitle.setTextFormat(QtCore.Qt.PlainText)
+        header.addWidget(self.tool_title)
+        header.addWidget(self.tool_subtitle, 1)
         header.addWidget(close)
         column.addLayout(header)
-
-        self.tool_subtitle = QtWidgets.QLabel('Source and clip information')
-        self.tool_subtitle.setProperty('dim', True)
-        self.tool_subtitle.setWordWrap(True)
-        column.addWidget(self.tool_subtitle)
 
         self.tool_stack = QtWidgets.QStackedWidget()
         column.addWidget(self.tool_stack, 1)
@@ -618,24 +704,50 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             widget.setObjectName('vcPageBody')
             layout = QtWidgets.QVBoxLayout(widget)
             layout.setContentsMargins(0, 0, 4, 0)
-            layout.setSpacing(10)
+            layout.setSpacing(6)
             scroll.setWidget(widget)
             self.tool_stack.addWidget(scroll)
             self._tool_pages[name] = scroll
             return layout
 
-        def section(layout, title):
-            # One card = one PANEL surface holding the title and its content.
-            # The dark page background shows in the gaps between cards; no
-            # groupbox title tricks, no extra inner panel.
+        def section(layout, title, collapsible=False, collapsed=False):
+            """Build a compact card with optional progressive disclosure."""
             card = QtWidgets.QFrame()
             card.setObjectName('vcCard')
-            inner = QtWidgets.QVBoxLayout(card)
-            inner.setContentsMargins(10, 8, 10, 10)
-            inner.setSpacing(6)
-            heading = QtWidgets.QLabel(title)
-            heading.setObjectName('vcCardTitle')
-            inner.addWidget(heading)
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 5, 8, 7)
+            card_layout.setSpacing(4)
+            if collapsible:
+                heading = QtWidgets.QToolButton()
+                heading.setObjectName('vcDisclosure')
+                heading.setText(title)
+                heading.setCheckable(True)
+                heading.setChecked(not collapsed)
+                heading.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+                heading.setArrowType(
+                    QtCore.Qt.DownArrow if not collapsed else QtCore.Qt.RightArrow)
+            else:
+                heading = QtWidgets.QLabel(title)
+                heading.setObjectName('vcCardTitle')
+            card_layout.addWidget(heading)
+
+            content = QtWidgets.QWidget()
+            inner = QtWidgets.QVBoxLayout(content)
+            inner.setContentsMargins(0, 0, 0, 0)
+            inner.setSpacing(4)
+            card_layout.addWidget(content)
+            inner.heading = heading
+            inner.content = content
+            inner.card = card
+            if collapsible:
+                content.setVisible(not collapsed)
+
+                def toggle(opened, body=content, button=heading):
+                    body.setVisible(opened)
+                    button.setArrowType(QtCore.Qt.DownArrow if opened
+                                        else QtCore.Qt.RightArrow)
+
+                heading.toggled.connect(toggle)
             layout.addWidget(card)
             return inner
 
@@ -652,12 +764,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.media_lbl.setWordWrap(True)
         source.addWidget(self.media_lbl)
         self.media_import_btn = QtWidgets.QPushButton('Import Media…')
+        self.media_import_btn.setIcon(self._icon('media'))
+        self.media_import_btn.setProperty('role', 'primary')
         source.addWidget(self.media_import_btn)
         navigation = section(media_page, 'Navigation')
         self.media_prev_marker_btn = QtWidgets.QPushButton('Previous Marker')
         self.media_next_marker_btn = QtWidgets.QPushButton('Next Marker')
-        navigation.addWidget(self.media_prev_marker_btn)
-        navigation.addWidget(self.media_next_marker_btn)
+        self.media_prev_marker_btn.setIcon(self._icon('previous'))
+        self.media_next_marker_btn.setIcon(self._icon('next'))
+        marker_row = QtWidgets.QHBoxLayout()
+        marker_row.addWidget(self.media_prev_marker_btn)
+        marker_row.addWidget(self.media_next_marker_btn)
+        navigation.addLayout(marker_row)
         media_page.addStretch(1)
 
         crop_page = page('crop')
@@ -667,18 +785,24 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         crop_box.addWidget(self.crop_lbl)
         self.crop_overlay_check = QtWidgets.QCheckBox('Show crop overlay')
         self.crop_overlay_check.setChecked(True)
-        crop_box.addWidget(self.crop_overlay_check)
-        self.clear_crop_btn = QtWidgets.QPushButton('Reset to Full Frame')
-        crop_box.addWidget(self.clear_crop_btn)
-        crop_page.addWidget(hint(
-            'Drag in the viewer to create a crop. Drag inside it to reposition.'))
+        self.clear_crop_btn = QtWidgets.QPushButton('Reset')
+        self.clear_crop_btn.setIcon(self._icon('clear-note'))
+        self.clear_crop_btn.setToolTip('Reset to the full frame')
+        crop_row = QtWidgets.QHBoxLayout()
+        crop_row.addWidget(self.crop_overlay_check)
+        crop_row.addStretch(1)
+        crop_row.addWidget(self.clear_crop_btn)
+        crop_box.addLayout(crop_row)
+        self.crop_lbl.setToolTip(
+            'Drag in the viewer to create a crop; drag inside it to reposition')
         crop_page.addStretch(1)
 
         draw_page = page('draw')
         tools_box = section(draw_page, 'Tool')
         tool_row = QtWidgets.QHBoxLayout()
+        tool_row.setSpacing(3)
         self.select_mode_btn = QtWidgets.QToolButton()
-        self.select_mode_btn.setText('Select')
+        self.select_mode_btn.setIcon(self._icon('select'))
         self.select_mode_btn.setToolTip('Select, marquee, move, scale, rotate notes')
         self.brush_mode_btn = QtWidgets.QToolButton()
         self.eraser_mode_btn = QtWidgets.QToolButton()
@@ -696,33 +820,46 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         tool_names = ('Select', 'Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow')
         for button, tool_name in zip(mode_buttons, tool_names):
             button.setCheckable(True)
-            button.setAutoRaise(True)          # flat; the stylesheet draws state
-            button.setFixedSize(36, 34)
-            button.setIconSize(QtCore.QSize(20, 20))
+            button.setAutoRaise(False)
+            button.setProperty('toolMode', True)
+            button.setFixedSize(34, 32)
+            button.setIconSize(QtCore.QSize(19, 19))
             button.setToolTip(tool_name)
             button.setAccessibleName(tool_name)
             tool_row.addWidget(button)
         tool_row.addStretch(1)
-        selection_hint = QtWidgets.QLabel(
-            'Select: click or drag a marquee. Shift-click to add/remove. '
-            'Drag inside to move; corner handles scale; top handle rotates.')
-        selection_hint.setWordWrap(True)
-        selection_hint.setProperty('dim', True)
-        tools_box.addWidget(selection_hint)
         self.brush_mode_btn.setChecked(True)
         self.draw_mode_group = QtWidgets.QButtonGroup(self)
         self.draw_mode_group.setExclusive(True)
         for button in mode_buttons:
             self.draw_mode_group.addButton(button)
         tools_box.addLayout(tool_row)
-        shape_hint = QtWidgets.QLabel(
-            'Drag to create shapes. Hold Shift for a perfect square or circle.')
-        shape_hint.setWordWrap(True)
-        shape_hint.setProperty('dim', True)
-        tools_box.addWidget(shape_hint)
 
-        brush = section(draw_page, 'Brush Tip')
-        self.draw_tip_title = brush.itemAt(0).widget()
+        brush = section(draw_page, 'Tool Settings')
+        self.draw_tip_title = brush.heading
+        self.draw_settings_stack = CompactStack()
+        brush.addWidget(self.draw_settings_stack)
+
+        select_settings = QtWidgets.QWidget()
+        select_layout = QtWidgets.QVBoxLayout(select_settings)
+        select_layout.setContentsMargins(0, 0, 0, 0)
+        select_layout.setSpacing(4)
+        select_hint = QtWidgets.QLabel(
+            'Click a note or drag around several. Shift-click changes the selection.')
+        select_hint.setWordWrap(True)
+        select_hint.setProperty('dim', True)
+        self.delete_selected_btn = QtWidgets.QPushButton('Delete Selected')
+        self.delete_selected_btn.setIcon(self._icon('clear-note'))
+        select_layout.addWidget(select_hint)
+        select_layout.addWidget(self.delete_selected_btn)
+        self.draw_settings_stack.addWidget(select_settings)
+
+        draw_settings = QtWidgets.QWidget()
+        draw_settings_layout = QtWidgets.QVBoxLayout(draw_settings)
+        draw_settings_layout.setContentsMargins(0, 0, 0, 0)
+        draw_settings_layout.setSpacing(4)
+        self.draw_settings_stack.addWidget(draw_settings)
+
         self.draw_color_panel = QtWidgets.QWidget()
         color_row = QtWidgets.QHBoxLayout(self.draw_color_panel)
         color_row.setContentsMargins(0, 0, 0, 0)
@@ -757,7 +894,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             swatch.setProperty('brushColor', color)
             self.draw_swatches.append(swatch)
             color_row.addWidget(swatch)
-        brush.addWidget(self.draw_color_panel)
+        draw_settings_layout.addWidget(self.draw_color_panel)
 
         def numeric_control(layout, label, minimum, maximum, value, suffix):
             container = QtWidgets.QWidget()
@@ -783,20 +920,26 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
         (self.draw_width_slider, self.draw_width,
          self.draw_width_caption, self.draw_width_panel) = numeric_control(
-            brush, 'Size', 1, 100, 6, ' px')
+            draw_settings_layout, 'Size', 1, 100, 6, ' px')
         (self.draw_opacity_slider, self.draw_opacity,
          self.draw_opacity_caption, self.draw_opacity_panel) = numeric_control(
-            brush, 'Opacity', 1, 100, 100, '%')
+            draw_settings_layout, 'Opacity', 1, 100, 100, '%')
         (self.draw_smoothing_slider, self.draw_smoothing,
          self.draw_smoothing_caption, self.draw_smoothing_panel) = numeric_control(
-            brush, 'Smoothing', 0, 100, 20, '%')
+            draw_settings_layout, 'Smoothing', 0, 100, 20, '%')
 
-        dynamics = section(draw_page, 'Tablet Dynamics')
+        dynamics = section(draw_page, 'Pen Pressure', collapsible=True,
+                           collapsed=True)
+        self.pressure_card = dynamics.card
+        dynamics_row = QtWidgets.QHBoxLayout()
         self.pressure_size_check = QtWidgets.QCheckBox('Pressure controls size')
         self.pressure_size_check.setChecked(True)
         self.pressure_opacity_check = QtWidgets.QCheckBox('Pressure controls opacity')
-        dynamics.addWidget(self.pressure_size_check)
-        dynamics.addWidget(self.pressure_opacity_check)
+        self.pressure_size_check.setText('Pressure size')
+        self.pressure_opacity_check.setText('Pressure opacity')
+        dynamics_row.addWidget(self.pressure_size_check)
+        dynamics_row.addWidget(self.pressure_opacity_check)
+        dynamics.addLayout(dynamics_row)
         pressure_row = QtWidgets.QHBoxLayout()
         pressure_row.addWidget(QtWidgets.QLabel('Pressure'))
         self.pressure_meter = QtWidgets.QProgressBar()
@@ -806,7 +949,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         pressure_row.addWidget(self.pressure_meter, 1)
         dynamics.addLayout(pressure_row)
         self.tablet_status_lbl = QtWidgets.QLabel('Mouse input · tablet pressure ready')
-        self.tablet_status_lbl.setWordWrap(True)
         self.tablet_status_lbl.setProperty('dim', True)
         dynamics.addWidget(self.tablet_status_lbl)
         keys = section(draw_page, 'Annotation Keys')
@@ -817,39 +959,55 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.next_drawing_btn = QtWidgets.QToolButton()
         self.next_drawing_btn.setIcon(self._icon('next'))
         self.next_drawing_btn.setToolTip('Next annotated frame')
+        self.drawing_lbl = QtWidgets.QLabel('No drawing on this frame')
+        self.drawing_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self.drawing_lbl.setWordWrap(True)
         draw_nav.addWidget(self.prev_drawing_btn)
+        draw_nav.addWidget(self.drawing_lbl, 1)
         draw_nav.addWidget(self.next_drawing_btn)
-        draw_nav.addStretch(1)
         keys.addLayout(draw_nav)
+
         edit_row = QtWidgets.QHBoxLayout()
         self.undo_drawing_btn = QtWidgets.QToolButton()
         self.undo_drawing_btn.setIcon(self._icon('undo'))
         self.undo_drawing_btn.setToolTip('Undo stroke')
         self.clear_drawing_btn = QtWidgets.QToolButton()
         self.clear_drawing_btn.setIcon(self._icon('clear-note'))
-        self.clear_drawing_btn.setToolTip('Clear current note')
-        self.import_notes_btn = QtWidgets.QToolButton()
-        self.import_notes_btn.setIcon(self._icon('import-notes'))
-        self.import_notes_btn.setToolTip('Import notes')
-        self.export_notes_btn = QtWidgets.QToolButton()
-        self.export_notes_btn.setIcon(self._icon('save-notes'))
-        self.export_notes_btn.setToolTip('Export notes')
+        self.clear_drawing_btn.setToolTip('Remove the current annotation key')
+        self.blank_drawing_btn = QtWidgets.QPushButton('+  Blank Here')
+        self.blank_drawing_btn.setProperty('role', 'primary')
+        self.blank_drawing_btn.setToolTip(
+            'Stop the previous annotation from holding past this frame')
         edit_row.addWidget(self.undo_drawing_btn)
         edit_row.addWidget(self.clear_drawing_btn)
-        edit_row.addSpacing(8)
-        edit_row.addWidget(self.import_notes_btn)
-        edit_row.addWidget(self.export_notes_btn)
-        edit_row.addStretch(1)
+        edit_row.addWidget(self.blank_drawing_btn, 1)
         keys.addLayout(edit_row)
+
+        manage = section(draw_page, 'Manage Notes', collapsible=True,
+                         collapsed=True)
+        file_row = QtWidgets.QHBoxLayout()
+        self.import_notes_btn = QtWidgets.QToolButton()
+        self.import_notes_btn.setIcon(self._icon('import-notes'))
+        self.import_notes_btn.setText('Import')
+        self.export_notes_btn = QtWidgets.QToolButton()
+        self.export_notes_btn.setIcon(self._icon('save-notes'))
+        self.export_notes_btn.setText('Export')
+        for button in (self.import_notes_btn, self.export_notes_btn):
+            button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+            button.setToolTip(button.text() + ' annotation notes')
+            file_row.addWidget(button, 1)
+        manage.addLayout(file_row)
+        self.delete_all_notes_btn = QtWidgets.QPushButton('Delete All Notes')
+        self.delete_all_notes_btn.setIcon(self._icon('clear-note'))
+        self.delete_all_notes_btn.setProperty('role', 'danger')
+        self.delete_all_notes_btn.setToolTip('Permanently remove every annotation key')
+        manage.addWidget(self.delete_all_notes_btn)
         for button in (self.prev_drawing_btn, self.next_drawing_btn,
-                       self.undo_drawing_btn, self.clear_drawing_btn,
-                       self.import_notes_btn, self.export_notes_btn):
-            button.setFixedSize(32, 30)
-            button.setIconSize(QtCore.QSize(18, 18))
-        self.drawing_lbl = QtWidgets.QLabel('No drawing on this frame')
-        self.drawing_lbl.setWordWrap(True)
-        keys.addWidget(self.drawing_lbl)
-        onion = section(draw_page, 'Onion Skin')
+                       self.undo_drawing_btn, self.clear_drawing_btn):
+            button.setFixedSize(29, 27)
+            button.setIconSize(QtCore.QSize(16, 16))
+        onion = section(draw_page, 'Onion Skin', collapsible=True,
+                        collapsed=True)
         self.onion_enable = QtWidgets.QCheckBox('Show neighboring notes')
         onion.addWidget(self.onion_enable)
         depth_row = QtWidgets.QHBoxLayout()
@@ -872,24 +1030,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         opacity_row.addWidget(self.onion_opacity, 1)
         opacity_row.addWidget(self.onion_opacity_label)
         onion.addLayout(opacity_row)
-        self.onion_falloff = QtWidgets.QCheckBox('Fade distant keys')
+        option_row = QtWidgets.QHBoxLayout()
+        self.onion_falloff = QtWidgets.QCheckBox('Fade distance')
         self.onion_falloff.setChecked(True)
-        onion.addWidget(self.onion_falloff)
-        self.onion_tint = QtWidgets.QCheckBox('Color previous / next')
+        self.onion_tint = QtWidgets.QCheckBox('Color sides')
         self.onion_tint.setChecked(True)
-        onion.addWidget(self.onion_tint)
-        onion.addWidget(hint('Previous keys are warm; next keys are cool. '
-                            'Held notes remain editable only on their own key.'))
-        draw_page.addWidget(hint(
-            'Notes hold forward until the next annotated frame.'))
+        option_row.addWidget(self.onion_falloff)
+        option_row.addWidget(self.onion_tint)
+        onion.addLayout(option_row)
         draw_page.addStretch(1)
 
         track_page = page('track')
         tracker = section(track_page, 'Crop Tracking')
-        tracker.addWidget(hint(
-            'Follow a crop across the shot. Use 1 point for position, '
-            '2 for rotation and scale, 3 for affine distortion, '
-            'or Perspective for a full corner-pin solution.'))
         self.tracking_mode = QtWidgets.QComboBox()
         for value, description in tracking.MODES:
             self.tracking_mode.addItem(description, value)
@@ -899,6 +1051,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         tracker.addWidget(self.tracking_mode)
         track_row = QtWidgets.QHBoxLayout()
         self.track_btn = QtWidgets.QPushButton('Track Forward')
+        self.track_btn.setIcon(self._icon('track'))
+        self.track_btn.setProperty('role', 'primary')
         self.clear_track_btn = QtWidgets.QPushButton('Clear')
         track_row.addWidget(self.track_btn, 1)
         track_row.addWidget(self.clear_track_btn)
@@ -915,12 +1069,14 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.clear_track_btn.setEnabled(False)
             self.tracking_mode.setEnabled(False)
             self.tracking_lbl.setText('Tracking unavailable')
-        track_page.addWidget(hint(
-            'Create a crop, move to its first frame, then track it forward.'))
+        self.tracking_mode.setToolTip(
+            self.tracking_mode.toolTip() +
+            ' Create a crop, move to its first frame, then track forward.')
         track_page.addStretch(1)
 
         review_page = page('review')
-        overlays = section(review_page, 'Overlays')
+        overlays = section(review_page, 'Overlays', collapsible=True,
+                           collapsed=True)
         self.safe_areas_check = QtWidgets.QCheckBox('Safe areas and center guides')
         overlays.addWidget(self.safe_areas_check)
         self.review_thumbs_check = QtWidgets.QCheckBox('Thumbnail timeline')
@@ -964,6 +1120,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.export_range_lbl = QtWidgets.QLabel('No media loaded')
         range_box.addWidget(self.export_range_lbl)
         self.export_btn = QtWidgets.QPushButton('Export Media…')
+        self.export_btn.setIcon(self._icon('export'))
+        self.export_btn.setProperty('role', 'primary')
         self.export_btn.setMinimumHeight(30)
         export_page.addWidget(self.export_btn)
         export_page.addStretch(1)
@@ -1244,6 +1402,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_width.valueChanged.connect(self._on_draw_size_changed)
         self.clear_drawing_btn.clicked.connect(self.surface.clear_current_drawing)
         self.undo_drawing_btn.clicked.connect(self.surface.undo_drawing_stroke)
+        self.delete_selected_btn.clicked.connect(self.surface.delete_selected_strokes)
+        self.blank_drawing_btn.clicked.connect(self.surface.create_blank_drawing)
+        self.delete_all_notes_btn.clicked.connect(self._delete_all_notes)
         self.prev_drawing_btn.clicked.connect(lambda: self._step_drawing(-1))
         self.next_drawing_btn.clicked.connect(lambda: self._step_drawing(1))
         for control in (self.onion_enable, self.onion_falloff, self.onion_tint):
@@ -1284,27 +1445,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
         self._shortcuts = []
         for keys, callback in (
-            ('Space', self.player.toggle),
-            ('[', self._mark_in), (']', self._mark_out),
-            ('Shift+R', self._reset_marked_range),
-            ('Left', lambda: self._scrub(self.player.current_frame - 1)),
-            ('Right', lambda: self._scrub(self.player.current_frame + 1)),
             ('Up', lambda: self._scrub(self.player.in_frame)),
             ('Down', lambda: self._scrub(self.player.out_frame)),
             ('Home', lambda: self._scrub(self.player.in_frame)),
             ('End', lambda: self._scrub(self.player.out_frame)),
-            ('V', lambda: self._show_tool('media')),
-            ('C', lambda: self._show_tool('crop')),
-            ('B', lambda: self._show_tool('draw')),
-            ('T', lambda: self._show_tool('track')),
-            ('R', lambda: self._show_tool('review')),
-            ('E', lambda: self._show_tool('export')),
-            ('G', lambda: self._show_tool('shotgrid')),
-            ('F', self.surface.fit_view),
-            ('Z', self._undo_action),
-            ('Ctrl+Z', self._undo_action),
-            ('Ctrl+Y', self._redo_action),
-            ('Ctrl+Shift+Z', self._redo_action),
         ):
             shortcut = QShortcut(QtGui.QKeySequence(keys), self)
             shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
@@ -1315,7 +1459,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
     def _choose_open(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Open media or review', self._notes_directory(),
-            'Media / FrameReviewer Notes (*.json *.mp4 *.mov *.mkv *.webm *.avi *.m4v *.jpg *.jpeg *.png *.tga *.exr);;All files (*)')
+            'Media / FrameReviewer Notes '
+            '(*.json *.mp4 *.mov *.mkv *.webm *.avi *.m4v '
+            '*.jpg *.jpeg *.png *.tga *.exr);;All files (*)')
         if path:
             self._load_path(path)
 
@@ -1361,7 +1507,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
     def _choose_media(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Import media', os.path.expanduser('~'),
-            'Media (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.jpg *.jpeg *.png *.tga *.exr);;All files (*)')
+            'Media (*.mp4 *.mov *.mkv *.webm *.avi *.m4v '
+            '*.jpg *.jpeg *.png *.tga *.exr);;All files (*)')
         if path:
             self._load_path(path)
 
@@ -1508,7 +1655,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                    self.brush_mode_btn, self.eraser_mode_btn,
                    self.rect_mode_btn, self.ellipse_mode_btn,
                    self.arrow_mode_btn,
+                   self.delete_selected_btn,
                    self.clear_drawing_btn, self.undo_drawing_btn,
+                   self.blank_drawing_btn, self.delete_all_notes_btn,
                    self.prev_drawing_btn, self.next_drawing_btn,
                    self.import_notes_btn, self.export_notes_btn,
                    self.safe_areas_check, self.fit_btn,
@@ -1850,13 +1999,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             return
         self.tool_stack.setCurrentWidget(page)
         titles = {
-            'media': ('MEDIA', 'Source and clip information'),
-            'crop': ('CROP', 'Define the visible export region'),
-            'draw': ('DRAW', 'Held frame annotations and notes'),
-            'track': ('TRACK', 'Follow the crop through the shot'),
-            'review': ('REVIEW', 'Viewer, timeline, and overlay controls'),
-            'export': ('EXPORT', 'Output size, range, and delivery'),
-            'shotgrid': ('FLOW / SHOTGRID', 'Browse and load review Versions'),
+            'media': ('MEDIA', 'Clip & source'),
+            'crop': ('CROP', 'Frame region'),
+            'draw': ('DRAW', 'Annotations'),
+            'track': ('TRACK', 'Crop motion'),
+            'review': ('REVIEW', 'Display'),
+            'export': ('EXPORT', 'Output'),
+            'shotgrid': ('FLOW / SHOTGRID', 'Review versions'),
         }
         title, subtitle = titles.get(name, (name.upper(), ''))
         self.tool_title.setText(title)
@@ -1935,15 +2084,27 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_width_slider.setValue(self._draw_tool_sizes.get(mode, 3))
         self.draw_width_slider.blockSignals(False)
         self.draw_width.blockSignals(False)
-        self.draw_tip_title.setVisible(mode != 'select')
-        self.draw_width.setVisible(mode != 'select')
-        self.draw_width_slider.setVisible(mode != 'select')
-        self.draw_width_caption.setVisible(mode != 'select')
-        self.draw_color_panel.setVisible(mode not in ('eraser', 'select'))
-        self.draw_opacity_panel.setVisible(mode not in ('eraser', 'select'))
-        self.draw_smoothing_panel.setVisible(mode == 'brush')
-        self.pressure_opacity_check.setVisible(mode not in ('eraser', 'select'))
+        is_select = mode == 'select'
+        self.draw_settings_stack.setCurrentIndex(0 if is_select else 1)
+        self.draw_color_panel.setEnabled(mode != 'eraser')
+        self.draw_opacity_panel.setEnabled(mode != 'eraser')
+        self.draw_smoothing_panel.setEnabled(mode == 'brush')
+        self.pressure_opacity_check.setEnabled(mode != 'eraser')
+        self.pressure_card.setEnabled(not is_select)
         self._update_brush_style()
+
+    def _activate_draw_mode(self, mode):
+        """Open annotation tools and select a drawing mode from a shortcut."""
+        buttons = {
+            'brush': self.brush_mode_btn,
+            'eraser': self.eraser_mode_btn,
+        }
+        self._show_tool('draw')
+        button = buttons[mode]
+        if button.isChecked():
+            self._set_draw_mode(mode)
+        else:
+            button.setChecked(True)
 
     def _on_tablet_pressure(self, pressure):
         value = int(round(utils.clamp(float(pressure), 0.0, 1.0) * 100))
@@ -1957,14 +2118,30 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.drawing_lbl.setText('No active annotation')
 
     def _on_active_annotation_changed(self, key_frame, count):
-        if key_frame < 0 or not count:
+        if key_frame < 0:
             self.drawing_lbl.setText('No active annotation')
+            return
+        if not count:
+            self.drawing_lbl.setText('Blank key on frame {}'.format(key_frame))
             return
         held = key_frame != self.player.current_frame
         self.drawing_lbl.setText(
             '{} stroke{}, {} frame {}'.format(
                 count, '' if count == 1 else 's',
                 'held from' if held else 'key on', key_frame))
+
+    def _delete_all_notes(self):
+        """Confirm and remove every annotation key as one undoable edit."""
+        if not self.surface.drawing_frames():
+            return
+        result = QtWidgets.QMessageBox.question(
+            self, 'Delete All Notes',
+            'Delete every annotation and blank annotation frame?\n\n'
+            'You can undo this action.',
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        if result == QtWidgets.QMessageBox.Yes:
+            self.surface.clear_drawings()
 
     def _step_drawing(self, direction):
         frames = self.surface.drawing_frames()
@@ -2059,7 +2236,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             if int(payload.get('version', 0)) != 1:
                 raise ValueError('Unsupported notes file version.')
             source = payload.get('source')
-            if not isinstance(source, dict) or not isinstance(source.get('path'), str) or not source['path'].strip():
+            if (not isinstance(source, dict) or
+                    not isinstance(source.get('path'), str) or
+                    not source['path'].strip()):
                 raise ValueError('The notes file has no source media path.')
             entries = payload.get('notes', [])
             if not isinstance(entries, list):
@@ -2520,7 +2699,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         out_w = max(2, out_w - out_w % 2)
         out_h = max(2, out_h - out_h % 2)
         dialog = ExportOptionsDialog(self, self.info.path, os.path.dirname(self.info.path))
-        if (dialog.exec() if hasattr(dialog, 'exec') else dialog.exec_()) != QtWidgets.QDialog.Accepted:
+        result = dialog.exec() if hasattr(dialog, 'exec') else dialog.exec_()
+        if result != QtWidgets.QDialog.Accepted:
             return
         export_fps = self.info.fps if self.fps_combo.currentData() == 'source' else 24.0
         snapshot = dict(

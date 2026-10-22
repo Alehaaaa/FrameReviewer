@@ -189,6 +189,7 @@ class Player(QtCore.QObject):
         self._pump.set_speed(self.speed)
         self._pump.frameChanged.connect(self._on_pump_frame)
         self._pump.stopped.connect(self._on_pump_stopped)
+        self._pump.bufferingChanged.connect(self._on_pump_buffering)
         self._pump.seek(frame, restrict_to_range=False)
         self._on_frame_available(frame)
 
@@ -301,7 +302,8 @@ class Player(QtCore.QObject):
             self._audio_seek_clock.restart()
             self._audio_requested_position = target
             self._audio_seek_timer.start()
-        should_play = self.playing and self._pump.is_playing()
+        should_play = (self.playing and self._pump.is_playing() and
+                       not self._pump.is_buffering())
         if should_play != self._audio_playing:
             self._audio_playing = should_play
             if should_play:
@@ -492,7 +494,9 @@ class Player(QtCore.QObject):
             self.errorText.emit(reason)
 
     def _check_decoder(self):
-        if self._backend == 'qt' and (self.playing or self._preparing) and not self._got_video_frame:
+        waiting_for_video = self.playing or self._preparing
+        if (self._backend == 'qt' and waiting_for_video and
+                not self._got_video_frame):
             self._defer_native_fallback()
 
     def _on_frame_error(self, message):
@@ -555,6 +559,12 @@ class Player(QtCore.QObject):
         sender = self.sender()
         if sender is None or sender is self._pump:
             self._set_playing(False)
+            self._sync_fallback_audio()
+
+    def _on_pump_buffering(self, buffering):
+        """Keep audio locked to video across startup and cache refills."""
+        sender = self.sender()
+        if sender is None or sender is self._pump:
             self._sync_fallback_audio()
 
     def pause(self):

@@ -2,10 +2,11 @@
 """The viewport: a QGraphicsView whose scene is in native video pixels.
 
 A single pixmap item displays decoded frames from the native video sink,
-FFmpeg streaming fallback, or an image sequence. Using one item for both means playback renders through the same
-reliable path as the poster, instead of a QGraphicsVideoItem that some drivers
-leave black. The crop rectangle sits on top, in native pixel coordinates, so
-there is no hand-rolled coordinate mapping anywhere.
+FFmpeg streaming fallback, or an image sequence. Using one item for every
+source means playback renders through the same reliable path as the poster,
+instead of a QGraphicsVideoItem that some drivers leave black. The crop
+rectangle sits on top, in native pixel coordinates, so there is no hand-rolled
+coordinate mapping anywhere.
 """
 from __future__ import absolute_import
 
@@ -544,6 +545,18 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         else:
             self._rebuild_drawing_items()
 
+    def create_blank_drawing(self):
+        """Create an empty key on the playhead, ending any held annotation."""
+        frame = self._current_frame
+        if frame in self._drawings and not self._drawings[frame]:
+            return
+        self._drawings[frame] = []
+        self._selected_strokes.clear()
+        self._selection_drag = None
+        self.annotationFramesChanged.emit(self.annotation_frame_colors())
+        self._rebuild_drawing_items()
+        self.edited.emit(frame)
+
     def undo_drawing_stroke(self):
         key = self.active_drawing_frame()
         strokes = self._drawings.get(key, []) if key >= 0 else []
@@ -603,8 +616,11 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         keys = self.drawing_frames()
         previous = [k for k in keys if k < self._current_frame and k != active]
         following = [k for k in keys if k > self._current_frame]
-        for frames, tint_color in ((previous[-self._onion_before:] if self._onion_before else [], '#ff735c'),
-                                   (following[:self._onion_after], '#54c9ed')):
+        previous_frames = (previous[-self._onion_before:]
+                           if self._onion_before else [])
+        following_frames = following[:self._onion_after]
+        for frames, tint_color in ((previous_frames, '#ff735c'),
+                                   (following_frames, '#54c9ed')):
             frames = list(reversed(frames)) if tint_color == '#ff735c' else frames
             for distance, key in enumerate(frames, 1):
                 factor = (1.0 / distance if self._onion_falloff else 1.0)
@@ -643,17 +659,36 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._rebuild_drawing_items()
 
     def _update_selection_box(self):
-        selected = [self._drawing_items[i] for i in sorted(self._selected_strokes)
-                    if i < len(self._drawing_items)]
+        key = self._selection_key
+        strokes = self._drawings.get(key, []) if key >= 0 else []
+        selected = [strokes[i] for i in sorted(self._selected_strokes)
+                    if i < len(strokes)]
         visible = bool(selected) and self._tool == 'draw' and self._draw_mode == 'select'
         self._selection_box.setVisible(visible)
         for handle in self._selection_handles.values():
             handle.setVisible(visible)
         if not visible:
             return
-        bounds = QtCore.QRectF(selected[0].sceneBoundingRect())
-        for item in selected[1:]:
-            bounds = bounds.united(item.sceneBoundingRect())
+        bounds = None
+        for stroke in selected:
+            points = [point for contour in self._stroke_polylines(stroke)
+                      for point in contour]
+            if not points:
+                continue
+            left = min(point[0] for point in points)
+            right = max(point[0] for point in points)
+            top = min(point[1] for point in points)
+            bottom = max(point[1] for point in points)
+            padding = self._scene_units(float(stroke.get('width', 3.0)) * 0.5)
+            stroke_bounds = QtCore.QRectF(left - padding, top - padding,
+                                          right - left + padding * 2.0,
+                                          bottom - top + padding * 2.0)
+            bounds = stroke_bounds if bounds is None else bounds.united(stroke_bounds)
+        if bounds is None:
+            self._selection_box.hide()
+            for handle in self._selection_handles.values():
+                handle.hide()
+            return
         self._selection_box.setRect(bounds)
         radius = 5.0 / max(0.001, abs(self.transform().m11()))
         locations = {'nw': bounds.topLeft(), 'ne': bounds.topRight(),
@@ -664,25 +699,104 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             self._selection_handles[name].setRect(
                 point.x()-radius, point.y()-radius, 2*radius, 2*radius)
 
+    def _scene_units(self, viewport_pixels):
+        """Convert a viewport-pixel measurement to native scene units."""
+        return float(viewport_pixels) / max(0.001, abs(self.transform().m11()))
+
+    @staticmethod
+    def _point_segment_distance(point, first, second):
+        """Shortest distance from ``point`` to a 2-D line segment."""
+        px, py = point.x(), point.y()
+        ax, ay = float(first[0]), float(first[1])
+        bx, by = float(second[0]), float(second[1])
+        dx, dy = bx - ax, by - ay
+        length_squared = dx * dx + dy * dy
+        if length_squared <= 1e-12:
+            return math.hypot(px - ax, py - ay)
+        amount = utils.clamp(((px - ax) * dx + (py - ay) * dy) /
+                             length_squared, 0.0, 1.0)
+        return math.hypot(px - (ax + amount * dx),
+                          py - (ay + amount * dy))
+
+    def _stroke_hit(self, stroke, point, tolerance_pixels=9.0):
+        """Hit-test stored stroke geometry in screen pixels.
+
+        QGraphicsItemGroup.shape() is empty or incomplete with cosmetic child
+        pens in some Maya Qt builds. Selection must therefore use the same
+        stored contours that draw and erase tools use, not Qt item internals.
+        """
+        tolerance = self._scene_units(
+            float(tolerance_pixels) + float(stroke.get('width', 3.0)) * 0.5)
+        contours = self._stroke_polylines(stroke)
+        for contour in contours:
+            if len(contour) == 1:
+                if math.hypot(point.x() - contour[0][0],
+                              point.y() - contour[0][1]) <= tolerance:
+                    return True
+            for first, second in zip(contour, contour[1:]):
+                if self._point_segment_distance(point, first, second) <= tolerance:
+                    return True
+        return False
+
+    @staticmethod
+    def _segment_intersects_rect(first, second, rect):
+        """Liang-Barsky segment/rectangle test without Qt enum differences."""
+        x1, y1 = float(first[0]), float(first[1])
+        x2, y2 = float(second[0]), float(second[1])
+        dx, dy = x2 - x1, y2 - y1
+        low, high = 0.0, 1.0
+        for direction, distance in ((-dx, x1 - rect.left()),
+                                    (dx, rect.right() - x1),
+                                    (-dy, y1 - rect.top()),
+                                    (dy, rect.bottom() - y1)):
+            if abs(direction) <= 1e-12:
+                if distance < 0.0:
+                    return False
+                continue
+            ratio = distance / direction
+            if direction < 0.0:
+                low = max(low, ratio)
+            else:
+                high = min(high, ratio)
+            if low > high:
+                return False
+        return True
+
+    def _stroke_intersects_rect(self, stroke, rect):
+        """Return whether a marquee touches any visible part of a stroke."""
+        padding = self._scene_units(float(stroke.get('width', 3.0)) * 0.5)
+        target = rect.adjusted(-padding, -padding, padding, padding)
+        for contour in self._stroke_polylines(stroke):
+            if any(target.contains(QtCore.QPointF(point[0], point[1]))
+                   for point in contour):
+                return True
+            if any(self._segment_intersects_rect(first, second, target)
+                   for first, second in zip(contour, contour[1:])):
+                return True
+        return False
+
     def _selection_hit(self, point):
-        tolerance = 11.0 / max(0.001, abs(self.transform().m11()))
+        tolerance = self._scene_units(11.0)
         if self._selected_strokes:
             for name, handle in self._selection_handles.items():
                 if handle.isVisible() and handle.rect().adjusted(
                         -tolerance, -tolerance, tolerance, tolerance).contains(point):
                     return name, None
-        for index in reversed(range(len(self._drawing_items))):
-            item = self._drawing_items[index]
-            local = item.mapFromScene(point)
-            if item.shape().contains(local) or item.sceneBoundingRect().adjusted(
-                    -tolerance, -tolerance, tolerance, tolerance).contains(point):
+        key = self.active_drawing_frame()
+        strokes = self._drawings.get(key, []) if key >= 0 else []
+        for index in reversed(range(len(strokes))):
+            if self._stroke_hit(strokes[index], point):
                 return 'stroke', index
         return 'empty', None
 
     def _selection_press(self, event):
-        point = self.mapToScene(event.pos())
+        self._selection_press_at(self.mapToScene(event.pos()), event.modifiers())
+
+    def _selection_press_at(self, point, modifiers=QtCore.Qt.NoModifier):
+        """Begin a selection gesture from either a mouse or tablet event."""
+        self.setFocus(QtCore.Qt.MouseFocusReason)
         action, index = self._selection_hit(point)
-        add = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+        add = bool(modifiers & QtCore.Qt.ShiftModifier)
         if action == 'stroke':
             if add:
                 if index in self._selected_strokes:
@@ -712,14 +826,16 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._selection_drag = (action, point, False, originals, box)
 
     def _selection_move(self, event):
+        self._selection_move_at(self.mapToScene(event.pos()), event.modifiers())
+
+    def _selection_move_at(self, point, modifiers=QtCore.Qt.NoModifier):
+        """Update a selection gesture from either a mouse or tablet event."""
         if self._selection_drag is None:
             return
         action, origin, _add, originals, box = self._selection_drag
-        point = self.mapToScene(event.pos())
         if action == 'marquee':
             self._selection_marquee.setRect(QtCore.QRectF(origin, point).normalized())
             return
-        import math
         center = box.center()
         if action == 'move':
             transform = lambda x,y: (x+point.x()-origin.x(), y+point.y()-origin.y())
@@ -727,7 +843,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             a0 = math.atan2(origin.y()-center.y(), origin.x()-center.x())
             a1 = math.atan2(point.y()-center.y(), point.x()-center.x())
             angle = a1-a0
-            if event.modifiers() & QtCore.Qt.ShiftModifier:
+            if modifiers & QtCore.Qt.ShiftModifier:
                 increment = math.pi / 12.0
                 angle = round(angle / increment) * increment
             cs, sn = math.cos(angle), math.sin(angle)
@@ -736,9 +852,13 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         else:
             opposite = {'nw': box.bottomRight(), 'ne': box.bottomLeft(),
                         'sw': box.topRight(), 'se': box.topLeft()}[action]
-            sx = (point.x()-opposite.x()) / (origin.x()-opposite.x()) if abs(origin.x()-opposite.x()) > 0.0001 else 1.0
-            sy = (point.y()-opposite.y()) / (origin.y()-opposite.y()) if abs(origin.y()-opposite.y()) > 0.0001 else 1.0
-            if event.modifiers() & QtCore.Qt.ShiftModifier:
+            origin_dx = origin.x() - opposite.x()
+            origin_dy = origin.y() - opposite.y()
+            sx = ((point.x() - opposite.x()) / origin_dx
+                  if abs(origin_dx) > 0.0001 else 1.0)
+            sy = ((point.y() - opposite.y()) / origin_dy
+                  if abs(origin_dy) > 0.0001 else 1.0)
+            if modifiers & QtCore.Qt.ShiftModifier:
                 value = sx if abs(sx) >= abs(sy) else sy
                 sx = sy = value
             transform = lambda x,y: (opposite.x()+(x-opposite.x())*sx,
@@ -761,8 +881,14 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         if drag[0] == 'marquee':
             bounds = self._selection_marquee.rect()
             self._selection_marquee.hide()
-            picked = {i for i,item in enumerate(self._drawing_items)
-                      if bounds.intersects(item.sceneBoundingRect())}
+            key = self.active_drawing_frame()
+            strokes = self._drawings.get(key, []) if key >= 0 else []
+            # A click on empty space produces a zero-size marquee and should
+            # only clear selection, never select a nearby bounding box.
+            picked = ({i for i, stroke in enumerate(strokes)
+                       if self._stroke_intersects_rect(stroke, bounds)}
+                      if bounds.width() >= self._scene_units(2.0) or
+                      bounds.height() >= self._scene_units(2.0) else set())
             self._selected_strokes.update(picked)
             self._update_selection_box()
         else:
@@ -772,7 +898,12 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         if drag[0] not in ('move','rotate','nw','ne','sw','se'):
             return
         key = self._selection_key
-        if key >= 0 and drag[3]:
+        originals = drag[3] or {}
+        strokes = self._drawings.get(key, [])
+        changed = any(index < len(strokes) and
+                      strokes[index].get('points', []) != original.get('points', [])
+                      for index, original in originals.items())
+        if key >= 0 and changed:
             self.annotationFramesChanged.emit(self.annotation_frame_colors())
             self.edited.emit(key)
 
@@ -976,8 +1107,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
                     if self._pressure_size else 1.0)
         return max(0.5, self._eraser_size * pressure / (2.0 * scale))
 
-    @staticmethod
-    def _stroke_polylines(stroke):
+    def _stroke_polylines(self, stroke):
         """Represent a shape as editable contours when an eraser hits it."""
         points = stroke.get('points', [])
         if len(points) < 2:
@@ -1404,6 +1534,19 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         eraser = self._tablet_is_eraser(event)
         point = self._tablet_position(event)
         self.tabletPressureChanged.emit(pressure)
+        if self._draw_mode == 'select':
+            if event_type == press:
+                self._tablet_active = True
+                self._selection_press_at(point, event.modifiers())
+            elif event_type == move and self._tablet_active:
+                self._selection_move_at(point, event.modifiers())
+            elif event_type == release and self._tablet_active:
+                self._selection_move_at(point, event.modifiers())
+                self._selection_release(event)
+                self._tablet_active = False
+                self.tabletPressureChanged.emit(0.0)
+            event.accept()
+            return
         if event_type == press:
             self._tablet_active = True
             self._start_stroke(

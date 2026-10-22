@@ -7,13 +7,13 @@ thread because pixmaps are GUI resources. A bounded worker semaphore prevents
 queued QImages from accumulating without limit when Maya's UI is busy.
 
 A new playhead location starts decoding at the playhead, grows forward first,
-retains previously displayed frames behind; ongoing forward decoders survive rolling-window shifts.
+and retains previously displayed frames behind. Forward decoders survive
+rolling-window shifts.
 There is no disk cache, poster extraction, or blocking QThread.wait on exit.
 """
 from __future__ import absolute_import
 
 import collections
-import os
 import subprocess
 import threading
 import time
@@ -33,8 +33,9 @@ UPLOAD_PER_TICK = 1           # One QPixmap upload per UI tick: avoid frame spik
 UPLOAD_INTERVAL_MS = 8
 SEEK_SETTLE_MS = 45           # Coalesce fast timeline scrubs before launching FFmpeg.
 MAX_RUNNING_DECODERS = 3      # Includes workers still shutting down after a seek.
-DECODE_STALL_SECONDS = 12.0  # Time waiting for FFmpeg to produce more stdout.
+DECODE_STALL_SECONDS = 12.0   # Time waiting for FFmpeg to produce more stdout.
 MAX_JPEG_BYTES = 16 * 1024 * 1024
+LOOP_PREROLL_FRAMES = 12      # Matches the pump's maximum rebuffer runway.
 
 
 def split_jpegs(buffer):
@@ -93,16 +94,19 @@ class _DecodeWorker(QtCore.QThread):
     imageReady = Signal(int, int, object)        # generation, index, QImage
     decodeDone = Signal(int, bool, str, int)    # generation, success, error, frames emitted
 
-    def __init__(self, ffmpeg, source, fps, start, end, generation, parent=None):
+    def __init__(self, ffmpeg, source, fps, start, end, generation,
+                 allowed_end=None, parent=None):
         super(_DecodeWorker, self).__init__(parent)
         self._ffmpeg = ffmpeg
         self._source = source
         self._fps = fps
         self.start_frame = int(start)
         self.end_frame = int(end)
+        self._allowed_end = int(end if allowed_end is None else allowed_end)
         self.generation = generation
         self._cancel = threading.Event()
         self._lock = threading.Lock()
+        self._window_ready = threading.Condition(self._lock)
         self._proc = None
         self._permits = threading.Semaphore(TRANSFER_LIMIT)
         self._read_started = None
@@ -114,14 +118,23 @@ class _DecodeWorker(QtCore.QThread):
     def cancel(self):
         """Request prompt shutdown without waiting or blocking the UI."""
         self._cancel.set()
-        with self._lock:
+        with self._window_ready:
             proc = self._proc
+            self._window_ready.notify_all()
         if proc is not None:
             try:
                 if proc.poll() is None:
                     proc.kill()
             except (OSError, ValueError):
                 pass
+
+    def extend_to(self, frame):
+        """Let a persistent forward decoder advance into a shifted window."""
+        with self._window_ready:
+            frame = min(self.end_frame, int(frame))
+            if frame > self._allowed_end:
+                self._allowed_end = frame
+                self._window_ready.notify_all()
 
     def _watch_output(self, proc, stopped):
         """Unblock a stalled pipe read without involving Maya's event loop.
@@ -186,6 +199,14 @@ class _DecodeWorker(QtCore.QThread):
             remaining = bytearray()
             frame = self.start_frame
             while frame <= self.end_frame and not self._cancel.is_set():
+                # Keep one FFmpeg process alive across rolling-window shifts,
+                # but stop reading before it can outrun the bounded cache.
+                with self._window_ready:
+                    while (frame > self._allowed_end and
+                           not self._cancel.is_set()):
+                        self._window_ready.wait(0.25)
+                if self._cancel.is_set():
+                    break
                 with self._lock:
                     self._read_started = time.monotonic()
                 try:
@@ -201,6 +222,12 @@ class _DecodeWorker(QtCore.QThread):
                     raise RuntimeError('FFmpeg emitted an oversized or incomplete JPEG frame.')
                 for blob in blobs:
                     if self._cancel.is_set() or frame > self.end_frame:
+                        break
+                    with self._window_ready:
+                        while (frame > self._allowed_end and
+                               not self._cancel.is_set()):
+                            self._window_ready.wait(0.25)
+                    if self._cancel.is_set():
                         break
                     image = QtGui.QImage.fromData(blob, 'JPG')
                     index = frame
@@ -361,20 +388,32 @@ class VideoFrameSource(QtCore.QObject):
             self._cache.move_to_end(frame)
         return image
 
+    def contiguous_available(self, frame, count, direction=1):
+        """Whether a short playback runway is already resident in memory."""
+        frame = int(frame)
+        count = max(1, int(count))
+        boundary = (min(self._last, self.last_available_frame) if direction >= 0
+                    else self._first)
+        stop = (min(boundary, frame + count - 1) if direction >= 0
+                else max(boundary, frame - count + 1))
+        step = 1 if direction >= 0 else -1
+        return all(index in self._cache
+                   for index in range(frame, stop + step, step))
+
     def ensure(self, frame, direction=1):
         if self._closed or self._failed:
             return
         frame = int(utils.clamp(frame, 0, self.last_available_frame))
         large_seek = abs(frame - self._current) > max(4, self._capacity // 8)
         self._direction = 1 if direction >= 0 else -1
+        if (large_seek and self._worker is not None and
+                (frame < self._current or frame not in self._cache)):
+            self._cancel_worker()
         self._move_window(frame)
         if large_seek:
             # Frequent slider events must not create one subprocess and QThread
             # per intermediate position. Cancel obsolete work immediately and
             # decode only the latest requested frame after the slider settles.
-            if (self._worker is not None and
-                    not self._worker.start_frame <= frame <= self._worker.end_frame):
-                self._cancel_worker()
             self._seek_timer.start()
         else:
             self._schedule()
@@ -387,7 +426,8 @@ class VideoFrameSource(QtCore.QObject):
             window_first, window_last = self._first, min(self._last, self.last_available_frame)
         else:
             window_first, window_last = 0, self.last_available_frame
-        reserve = min(3, self._capacity - 1) if self._loop_enabled else 0
+        reserve = (min(LOOP_PREROLL_FRAMES, self._capacity - 1)
+                   if self._loop_enabled else 0)
         capacity = max(1, self._capacity - reserve)
         desired = window_for_playhead(self._current, capacity,
                                       window_first, window_last, self._direction)
@@ -405,6 +445,8 @@ class VideoFrameSource(QtCore.QObject):
         if force or desired != self._window or capacity != self._window_capacity:
             self._window_capacity = capacity
             self._window = desired
+            if self._worker is not None and self._direction >= 0:
+                self._worker.extend_to(desired[1])
             self._prune()
             self._mark_state()
 
@@ -413,9 +455,10 @@ class VideoFrameSource(QtCore.QObject):
             return False
         if self._direction < 0:
             last = min(self._last, self.last_available_frame)
-            return max(self._first, last - 2) <= frame <= last
+            return max(self._first, last - LOOP_PREROLL_FRAMES + 1) <= frame <= last
         return self._loop_start <= frame <= min(
-            self._loop_start + 2, self._last, self.last_available_frame)
+            self._loop_start + LOOP_PREROLL_FRAMES - 1,
+            self._last, self.last_available_frame)
 
     def _remove(self, frame):
         image = self._cache.pop(frame, None)
@@ -455,19 +498,19 @@ class VideoFrameSource(QtCore.QObject):
                 if index not in self._cache:
                     return max(low, index - BATCH_SIZE + 1), index
         if self._loop_enabled and self._first <= current <= self._last:
-            # Fill the opposite edge before wrapping; reserve only three
-            # cached frames there, inside the same existing capacity limit.
+            # Fill the opposite edge before wrapping; its short pre-roll stays
+            # inside the same fixed frame/byte capacity.
             threshold = min(15, max(4, self._capacity // 5))
             playback_last = min(self._last, self.last_available_frame)
             if self._direction >= 0 and playback_last - current <= threshold:
                 start = self._loop_start
-                stop = min(start + 2, playback_last)
+                stop = min(start + LOOP_PREROLL_FRAMES - 1, playback_last)
                 for index in range(start, stop + 1):
                     if index not in self._cache:
                         return index, stop
             elif self._direction < 0 and current - self._first <= threshold:
                 stop = playback_last
-                start = max(self._first, stop - 2)
+                start = max(self._first, stop - LOOP_PREROLL_FRAMES + 1)
                 for index in range(stop, start - 1, -1):
                     if index not in self._cache:
                         return start, stop
@@ -489,7 +532,10 @@ class VideoFrameSource(QtCore.QObject):
                     worker.start_frame <= self._current + 1 <= worker.end_frame):
                 return
             # A true seek to an uncached region takes precedence over old work.
-            if self._current not in self._cache or requested < worker.start_frame or requested > worker.end_frame:
+            obsolete = (self._current not in self._cache or
+                        requested < worker.start_frame or
+                        requested > worker.end_frame)
+            if obsolete:
                 self._cancel_worker()
         if self._worker is not None or self._pending:
             return
@@ -510,12 +556,18 @@ class VideoFrameSource(QtCore.QObject):
         # `maximum` already belongs to the active cache window. That window can
         # intentionally be outside the marked playback range while inspecting
         # source frames, so clamping it to `_last` can create stop < start.
-        stop = min(maximum, start + BATCH_SIZE - 1, self.last_available_frame)
+        stop = min(maximum, self.last_available_frame)
+        if self._direction < 0:
+            stop = min(stop, start + BATCH_SIZE - 1)
         if stop < start:
             return
         self._generation += 1
+        # Forward playback keeps a single process alive. The worker blocks at
+        # `stop` until the rolling window advances, avoiding periodic FFmpeg
+        # startup/keyframe-seek stalls while retaining the same memory bound.
+        decode_end = self.last_available_frame if self._direction >= 0 else stop
         worker = _DecodeWorker(self._ffmpeg, self._source, self._fps,
-                               start, stop, self._generation,
+                               start, decode_end, self._generation, stop,
                                QtCore.QCoreApplication.instance())
         worker.imageReady.connect(self._on_image)
         worker.decodeDone.connect(self._on_done)

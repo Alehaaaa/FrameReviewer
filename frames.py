@@ -103,6 +103,9 @@ class FramePump(QtCore.QObject):
         self._buffering = False
         self._external_clock = None
         self._external_wrap = None
+        # Decode a short contiguous runway before starting or resuming. This
+        # absorbs FFmpeg/GUI scheduling jitter without adding perceptible wait.
+        self._runway_frames = max(3, min(12, int(round(self._fps * 0.25))))
 
     def set_external_clock(self, get_ms, on_wrap=None):
         """Use soundtrack time as playback master when audio is available."""
@@ -120,6 +123,12 @@ class FramePump(QtCore.QObject):
 
     def is_playing(self):
         return self._timer.isActive()
+
+    def _has_runway(self):
+        checker = getattr(self._source, 'contiguous_available', None)
+        if checker is not None:
+            return checker(self.frame, self._runway_frames, 1)
+        return self._source.get(self.frame) is not None
 
     def _effective_out(self):
         """Honor a clean FFmpeg EOF earlier than ffprobe's frame estimate."""
@@ -139,7 +148,7 @@ class FramePump(QtCore.QObject):
         self._anchor = self.frame
         self._clock.start()
         self._source.ensure(self.frame)
-        self._set_buffering(self._source.get(self.frame) is None)
+        self._set_buffering(not self._has_runway())
         self._timer.start()
 
     def pause(self):
@@ -161,7 +170,7 @@ class FramePump(QtCore.QObject):
         low = min(low, high)
         self.frame = int(utils.clamp(frame, low, high))
         self._source.ensure(self.frame)
-        self._set_buffering(self._source.get(self.frame) is None)
+        self._set_buffering(not self._has_runway())
         if self.is_playing():
             self._anchor = self.frame
             self._clock.restart()
@@ -172,6 +181,13 @@ class FramePump(QtCore.QObject):
         if self.in_frame >= end:
             self.pause()
             return
+        if self._buffering:
+            self._source.ensure(self.frame)
+            if not self._has_runway():
+                return
+            self._set_buffering(False)
+            self._anchor = self.frame
+            self._clock.restart()
         if self._external_clock is not None:
             position_ms = self._external_clock()
             if position_ms is not None:
@@ -188,8 +204,8 @@ class FramePump(QtCore.QObject):
                 candidate = int(utils.clamp(candidate, self.in_frame, end))
                 self._source.ensure(candidate)
                 if self._source.get(candidate) is None:
-                    # Let sound continue through brief video cache misses;
-                    # display the latest decoded frame when it arrives.
+                    # Pause both clocks until a contiguous runway is ready;
+                    # resuming one frame at a time creates visible judder.
                     self._set_buffering(True)
                     return
                 self._set_buffering(False)
