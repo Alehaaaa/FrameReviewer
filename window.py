@@ -465,7 +465,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 break
 
     def _icon(self, name):
-        return QtGui.QIcon(os.path.join(ICON_DIR, '{}.png'.format(name)))
+        png = os.path.join(ICON_DIR, '{}.png'.format(name))
+        return QtGui.QIcon(png if os.path.isfile(png) else
+                           os.path.join(ICON_DIR, '{}.svg'.format(name)))
 
     def _build_menu(self):
         bar = QtWidgets.QMenuBar(self)
@@ -1268,13 +1270,26 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         folder = tempfile.mkdtemp(prefix='framereviewer_playblast_')
         prefix = os.path.join(folder, 'shot')
         try:
+            # Prefer the current Camera Sequencer shot. Outside a sequencer
+            # shot Maya's playblast defaults to the playback slider range.
+            current = float(cmds.currentTime(query=True))
+            shots = []
+            for shot in cmds.ls(type='shot') or []:
+                start = float(cmds.shot(shot, query=True, startTime=True))
+                end = float(cmds.shot(shot, query=True, endTime=True))
+                if start <= current <= end:
+                    shots.append((end - start, start, end))
+            range_args = {}
+            if shots:
+                _, start, end = min(shots)
+                range_args = {'startTime': start, 'endTime': end}
             # Maya's image playblast is portable across Linux, macOS and Windows;
             # FrameReviewer already supports numbered image sequences.
             result = cmds.playblast(
                 format='image', compression='jpg', filename=prefix,
                 forceOverwrite=True, viewer=False, showOrnaments=False,
                 offScreen=True, percent=100, quality=90, clearCache=True,
-                sequenceTime=False)
+                sequenceTime=False, **range_args)
             files = sorted(glob.glob(prefix + '*.jpg') + glob.glob(prefix + '*.jpeg'))
             if not files and result:
                 files = sorted(glob.glob(os.path.splitext(str(result))[0] + '*.jpg'))
