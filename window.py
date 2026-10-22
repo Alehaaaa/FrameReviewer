@@ -518,6 +518,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         review_menu = bar.addMenu('Review')
         self.act_thumbs = action(review_menu, 'Thumbnail Timeline', self._toggle_thumbnails, checkable=True, checked=True)
         self.act_wave = action(review_menu, 'Audio Waveform', self._toggle_waveform, checkable=True, checked=True)
+        self.act_onion = action(review_menu, 'Onion Skin', self._toggle_onion, checkable=True, shortcut='Ctrl+Shift+O')
         review_menu.addSeparator()
         self.act_crop = action(review_menu, 'Crop Overlay', self.surface.set_crop_visible,
                                checkable=True, checked=True)
@@ -1959,9 +1960,15 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         if candidates:
             self._scrub(max(candidates) if direction < 0 else min(candidates))
 
+    def _toggle_onion(self, enabled):
+        self.onion_enable.setChecked(bool(enabled))
+
     def _update_onion_skin(self, *_):
         value = self.onion_opacity.value()
         self.onion_opacity_label.setText('{}%'.format(value))
+        self.act_onion.blockSignals(True)
+        self.act_onion.setChecked(self.onion_enable.isChecked())
+        self.act_onion.blockSignals(False)
         self.surface.set_onion_skin(
             enabled=self.onion_enable.isChecked(),
             before=self.onion_before.value(),
