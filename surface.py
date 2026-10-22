@@ -393,6 +393,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
     # -- review tools ----------------------------------------------------
     def set_tool(self, tool):
         self._tool = str(tool)
+        self._update_selection_box()
         self._apply_draw_cursor()
 
     def _apply_draw_cursor(self):
@@ -518,6 +519,8 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             # stroke again on subsequent frames.
             loaded[frame] = clean_strokes
         if replace:
+            self._selected_strokes.clear()
+            self._selection_drag = None
             self._drawings = loaded
         else:
             for frame, strokes in loaded.items():
@@ -562,6 +565,10 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._erase_changed = False
         self._erase_last_point = None
         had_drawings = bool(self._drawings)
+        self._selected_strokes.clear()
+        self._selection_key = -1
+        self._selection_drag = None
+        self._selection_marquee.hide()
         self._drawings.clear()
         self.annotationFramesChanged.emit({})
         self._rebuild_drawing_items()
@@ -628,6 +635,8 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
 
     def restore_drawings(self, snapshot):
         """Replace all drawings with a snapshot. Does not emit ``edited``."""
+        self._selected_strokes.clear()
+        self._selection_drag = None
         self._drawings = {frame: self._copy_strokes(strokes)
                           for frame, strokes in dict(snapshot or {}).items()}
         self.annotationFramesChanged.emit(self.annotation_frame_colors())
@@ -736,8 +745,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             return
         for index, stroke in originals.items():
             edited = self._copy_strokes([stroke])[0]
-            edited['points'] = [(transform(float(x),float(y))[0],
-                                 transform(float(x),float(y))[1],p)
+            edited['points'] = [tuple(transform(float(x),float(y))) + (p,)
                                 for x,y,p in stroke.get('points', [])]
             self._drawings[key][index] = edited
         self._rebuild_drawing_items()
