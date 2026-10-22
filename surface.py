@@ -88,7 +88,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._selection_box = QtWidgets.QGraphicsRectItem()
         self._selection_box.setZValue(35)
         self._selection_box.setPen(QtGui.QPen(QtGui.QColor('#64c9ff'), 1, QtCore.Qt.DashLine))
-        self._selection_box.setBrush(QtCore.Qt.NoBrush)
+        self._selection_box.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
         self._selection_box.setAcceptedMouseButtons(QtCore.Qt.NoButton)
         self.scene().addItem(self._selection_box)
         self._selection_box.hide()
@@ -727,6 +727,9 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             a0 = math.atan2(origin.y()-center.y(), origin.x()-center.x())
             a1 = math.atan2(point.y()-center.y(), point.x()-center.x())
             angle = a1-a0
+            if event.modifiers() & QtCore.Qt.ShiftModifier:
+                increment = math.pi / 12.0
+                angle = round(angle / increment) * increment
             cs, sn = math.cos(angle), math.sin(angle)
             transform = lambda x,y: (center.x()+(x-center.x())*cs-(y-center.y())*sn,
                                      center.y()+(x-center.x())*sn+(y-center.y())*cs)
@@ -1228,6 +1231,35 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
     def showEvent(self, event):
         QtWidgets.QGraphicsView.showEvent(self, event)
         self._position_placeholder()
+
+    def delete_selected_strokes(self):
+        """Delete selected committed strokes as one undoable edit."""
+        key = self._selection_key
+        if not self._selected_strokes or key not in self._drawings:
+            return
+        self._drawings[key] = [
+            stroke for index, stroke in enumerate(self._drawings[key])
+            if index not in self._selected_strokes]
+        self._selected_strokes.clear()
+        # Keep an empty key to prevent an earlier held note reappearing.
+        self.annotationFramesChanged.emit(self.annotation_frame_colors())
+        self._rebuild_drawing_items()
+        self.edited.emit(key)
+
+    def keyPressEvent(self, event):
+        if self._tool == 'draw' and self._draw_mode == 'select':
+            if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+                self.delete_selected_strokes()
+                event.accept()
+                return
+            if event.key() == QtCore.Qt.Key_Escape:
+                self._selected_strokes.clear()
+                self._selection_drag = None
+                self._selection_marquee.hide()
+                self._update_selection_box()
+                event.accept()
+                return
+        QtWidgets.QGraphicsView.keyPressEvent(self, event)
 
     def mousePressEvent(self, event):
         if self._tablet_active:
