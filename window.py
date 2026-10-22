@@ -677,6 +677,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         draw_page = page('draw')
         tools_box = section(draw_page, 'Tool')
         tool_row = QtWidgets.QHBoxLayout()
+        self.select_mode_btn = QtWidgets.QToolButton()
+        self.select_mode_btn.setText('Select')
+        self.select_mode_btn.setToolTip('Select, marquee, move, scale, rotate notes')
         self.brush_mode_btn = QtWidgets.QToolButton()
         self.eraser_mode_btn = QtWidgets.QToolButton()
         self.rect_mode_btn = QtWidgets.QToolButton()
@@ -688,9 +691,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.ellipse_mode_btn.setIcon(self._icon('ellipse'))
         self.arrow_mode_btn.setIcon(self._icon('arrow'))
         mode_buttons = (
-            self.brush_mode_btn, self.eraser_mode_btn, self.rect_mode_btn,
+            self.select_mode_btn, self.brush_mode_btn, self.eraser_mode_btn, self.rect_mode_btn,
             self.ellipse_mode_btn, self.arrow_mode_btn)
-        tool_names = ('Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow')
+        tool_names = ('Select', 'Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow')
         for button, tool_name in zip(mode_buttons, tool_names):
             button.setCheckable(True)
             button.setAutoRaise(True)          # flat; the stylesheet draws state
@@ -700,6 +703,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             button.setAccessibleName(tool_name)
             tool_row.addWidget(button)
         tool_row.addStretch(1)
+        selection_hint = QtWidgets.QLabel(
+            'Select: click or drag a marquee. Shift-click to add/remove. '
+            'Drag inside to move; corner handles scale; top handle rotates.')
+        selection_hint.setWordWrap(True)
+        selection_hint.setProperty('dim', True)
+        tools_box.addWidget(selection_hint)
         self.brush_mode_btn.setChecked(True)
         self.draw_mode_group = QtWidgets.QButtonGroup(self)
         self.draw_mode_group.setExclusive(True)
@@ -1213,6 +1222,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
         self.draw_color_picker.currentColorChanged.connect(self._set_drawing_color)
         for mode, button in (
+                ('select', self.select_mode_btn),
                 ('brush', self.brush_mode_btn),
                 ('eraser', self.eraser_mode_btn),
                 ('rectangle', self.rect_mode_btn),
@@ -1907,6 +1917,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._current_draw_mode = mode
         self.surface.set_draw_mode(mode)
         labels = {
+            'select': ('Selection', 'Size'),
             'brush': ('Brush Tip', 'Size'),
             'eraser': ('Eraser Tip', 'Diameter'),
             'rectangle': ('Rectangle Outline', 'Width'),
@@ -1920,14 +1931,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_width_slider.blockSignals(True)
         self.draw_width.setRange(1, maximum)
         self.draw_width_slider.setRange(1, maximum)
-        self.draw_width.setValue(self._draw_tool_sizes[mode])
-        self.draw_width_slider.setValue(self._draw_tool_sizes[mode])
+        self.draw_width.setValue(self._draw_tool_sizes.get(mode, 3))
+        self.draw_width_slider.setValue(self._draw_tool_sizes.get(mode, 3))
         self.draw_width_slider.blockSignals(False)
         self.draw_width.blockSignals(False)
-        self.draw_color_panel.setVisible(mode != 'eraser')
-        self.draw_opacity_panel.setVisible(mode != 'eraser')
+        self.draw_tip_title.setVisible(mode != 'select')
+        self.draw_width.setVisible(mode != 'select')
+        self.draw_width_slider.setVisible(mode != 'select')
+        self.draw_width_caption.setVisible(mode != 'select')
+        self.draw_color_panel.setVisible(mode not in ('eraser', 'select'))
+        self.draw_opacity_panel.setVisible(mode not in ('eraser', 'select'))
         self.draw_smoothing_panel.setVisible(mode == 'brush')
-        self.pressure_opacity_check.setVisible(mode != 'eraser')
+        self.pressure_opacity_check.setVisible(mode not in ('eraser', 'select'))
         self._update_brush_style()
 
     def _on_tablet_pressure(self, pressure):
