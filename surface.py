@@ -82,6 +82,13 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._current_frame = 0
         self._drawings = {}
         self._drawing_items = []
+        self._onion_items = []
+        self._onion_enabled = False
+        self._onion_before = 2
+        self._onion_after = 2
+        self._onion_opacity = 0.35
+        self._onion_falloff = True
+        self._onion_tint = True
         self._active_item = None
         self._active_points = []
         self._pending_strokes = None
@@ -402,6 +409,23 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._current_frame = int(frame)
         self._rebuild_drawing_items()
 
+    def set_onion_skin(self, enabled=None, before=None, after=None,
+                       opacity=None, falloff=None, tint=None):
+        """Display neighboring annotation keys without changing stored strokes."""
+        if enabled is not None:
+            self._onion_enabled = bool(enabled)
+        if before is not None:
+            self._onion_before = max(0, min(20, int(before)))
+        if after is not None:
+            self._onion_after = max(0, min(20, int(after)))
+        if opacity is not None:
+            self._onion_opacity = utils.clamp(float(opacity), 0.0, 1.0)
+        if falloff is not None:
+            self._onion_falloff = bool(falloff)
+        if tint is not None:
+            self._onion_tint = bool(tint)
+        self._rebuild_drawing_items()
+
     def drawing_frames(self):
         return sorted(self._drawings)
 
@@ -513,6 +537,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
 
     def _rebuild_drawing_items(self):
         self._remove_drawing_items()
+        self._rebuild_onion_items()
         key = self.active_drawing_frame()
         strokes = self._drawings.get(key, []) if key >= 0 else []
         for stroke in strokes:
@@ -520,6 +545,33 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             self._drawing_items.append(item)
         self.drawingChanged.emit(len(self._drawing_items))
         self.activeAnnotationChanged.emit(key, len(self._drawing_items))
+
+    def _rebuild_onion_items(self):
+        for item in self._onion_items:
+            self.scene().removeItem(item)
+        self._onion_items = []
+        if not self._onion_enabled or self._onion_opacity <= 0:
+            return
+        # Held drawings are not new keys. Exclude the active key so the
+        # current annotation never appears twice while it is held.
+        active = self.active_drawing_frame()
+        keys = self.drawing_frames()
+        previous = [k for k in keys if k < self._current_frame and k != active]
+        following = [k for k in keys if k > self._current_frame]
+        for frames, tint_color in ((previous[-self._onion_before:] if self._onion_before else [], '#ff735c'),
+                                   (following[:self._onion_after], '#54c9ed')):
+            frames = list(reversed(frames)) if tint_color == '#ff735c' else frames
+            for distance, key in enumerate(frames, 1):
+                factor = (1.0 / distance if self._onion_falloff else 1.0)
+                for stroke in self._drawings[key]:
+                    ghost = dict(stroke)
+                    if self._onion_tint:
+                        ghost['color'] = tint_color
+                    item = self._make_stroke_item(ghost)
+                    item.setOpacity(self._onion_opacity * factor)
+                    item.setZValue(18)
+                    item.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+                    self._onion_items.append(item)
 
     def _remove_drawing_items(self):
         """Remove only the committed annotation graphics from the scene."""
