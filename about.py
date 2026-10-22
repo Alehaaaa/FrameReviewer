@@ -58,7 +58,7 @@ class AboutDialog(QtWidgets.QDialog):
 
         logo = QtWidgets.QLabel()
         logo.setAlignment(QtCore.Qt.AlignCenter)
-        logo.setPixmap(QtGui.QIcon(os.path.join(ICON_DIR, "logo.svg")).pixmap(84, 84))
+        logo.setPixmap(QtGui.QIcon(os.path.join(ICON_DIR, "logo.png")).pixmap(84, 84))
         root.addWidget(logo)
 
         name = QtWidgets.QLabel("FrameReviewer")

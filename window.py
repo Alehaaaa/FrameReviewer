@@ -14,6 +14,8 @@ import html
 import json
 import os
 import shutil
+import tempfile
+import glob
 import sys
 
 from .qtcompat import (QtCore, QtGui, QtWidgets, Signal, QAction, QActionGroup, QShortcut,
@@ -194,6 +196,19 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._current_flip_h = self.act_flip_h.isChecked()
         self._current_flip_v = self.act_flip_v.isChecked()
         self._connect_preference_saving()
+        # Restore persisted onion settings after UI wiring; these settings are
+        # display-only and never modify the exported annotation data.
+        for control, setting in (
+                (self.onion_enable, self.settings.get_bool('onion/enabled', False)),
+                (self.onion_before, self.settings.get_int('onion/before', 2)),
+                (self.onion_after, self.settings.get_int('onion/after', 2)),
+                (self.onion_opacity, self.settings.get_int('onion/opacity', 35)),
+                (self.onion_falloff, self.settings.get_bool('onion/falloff', True)),
+                (self.onion_tint, self.settings.get_bool('onion/tint', True))):
+            control.blockSignals(True)
+            control.setChecked(setting) if isinstance(control, QtWidgets.QCheckBox) else control.setValue(setting)
+            control.blockSignals(False)
+        self._update_onion_skin()
         self._set_enabled(False)
         self.surface.set_placeholder_visible(True)
 
@@ -463,7 +478,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 break
 
     def _icon(self, name):
-        return QtGui.QIcon(os.path.join(ICON_DIR, '{}.svg'.format(name)))
+        png = os.path.join(ICON_DIR, '{}.png'.format(name))
+        return QtGui.QIcon(png if os.path.isfile(png) else
+                           os.path.join(ICON_DIR, '{}.svg'.format(name)))
 
     def _build_menu(self):
         bar = QtWidgets.QMenuBar(self)
@@ -488,7 +505,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             return act
 
         file_menu = bar.addMenu('File')
+        self.act_open = action(file_menu, 'Open…', self._choose_open, shortcut='Ctrl+O')
         self.act_import = action(file_menu, 'Import Media…', self._choose_media, shortcut='I')
+        action(file_menu, 'Playblast Current Shot', self._playblast_current_shot)
         self.recent_menu = file_menu.addMenu('Recent Media')
         self.recent_menu.aboutToShow.connect(self._populate_recent_menu)
         self._populate_recent_menu()  # build once so it is never empty on show
@@ -499,6 +518,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         review_menu = bar.addMenu('Review')
         self.act_thumbs = action(review_menu, 'Thumbnail Timeline', self._toggle_thumbnails, checkable=True, checked=True)
         self.act_wave = action(review_menu, 'Audio Waveform', self._toggle_waveform, checkable=True, checked=True)
+        self.act_onion = action(review_menu, 'Onion Skin', self._toggle_onion, checkable=True, shortcut='Ctrl+Shift+O')
         review_menu.addSeparator()
         self.act_crop = action(review_menu, 'Crop Overlay', self.surface.set_crop_visible,
                                checkable=True, checked=True)
@@ -657,6 +677,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         draw_page = page('draw')
         tools_box = section(draw_page, 'Tool')
         tool_row = QtWidgets.QHBoxLayout()
+        self.select_mode_btn = QtWidgets.QToolButton()
+        self.select_mode_btn.setText('Select')
+        self.select_mode_btn.setToolTip('Select, marquee, move, scale, rotate notes')
         self.brush_mode_btn = QtWidgets.QToolButton()
         self.eraser_mode_btn = QtWidgets.QToolButton()
         self.rect_mode_btn = QtWidgets.QToolButton()
@@ -668,9 +691,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.ellipse_mode_btn.setIcon(self._icon('ellipse'))
         self.arrow_mode_btn.setIcon(self._icon('arrow'))
         mode_buttons = (
-            self.brush_mode_btn, self.eraser_mode_btn, self.rect_mode_btn,
+            self.select_mode_btn, self.brush_mode_btn, self.eraser_mode_btn, self.rect_mode_btn,
             self.ellipse_mode_btn, self.arrow_mode_btn)
-        tool_names = ('Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow')
+        tool_names = ('Select', 'Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow')
         for button, tool_name in zip(mode_buttons, tool_names):
             button.setCheckable(True)
             button.setAutoRaise(True)          # flat; the stylesheet draws state
@@ -680,6 +703,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             button.setAccessibleName(tool_name)
             tool_row.addWidget(button)
         tool_row.addStretch(1)
+        selection_hint = QtWidgets.QLabel(
+            'Select: click or drag a marquee. Shift-click to add/remove. '
+            'Drag inside to move; corner handles scale; top handle rotates.')
+        selection_hint.setWordWrap(True)
+        selection_hint.setProperty('dim', True)
+        tools_box.addWidget(selection_hint)
         self.brush_mode_btn.setChecked(True)
         self.draw_mode_group = QtWidgets.QButtonGroup(self)
         self.draw_mode_group.setExclusive(True)
@@ -820,6 +849,37 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.drawing_lbl = QtWidgets.QLabel('No drawing on this frame')
         self.drawing_lbl.setWordWrap(True)
         keys.addWidget(self.drawing_lbl)
+        onion = section(draw_page, 'Onion Skin')
+        self.onion_enable = QtWidgets.QCheckBox('Show neighboring notes')
+        onion.addWidget(self.onion_enable)
+        depth_row = QtWidgets.QHBoxLayout()
+        self.onion_before = QtWidgets.QSpinBox()
+        self.onion_after = QtWidgets.QSpinBox()
+        for control in (self.onion_before, self.onion_after):
+            control.setRange(0, 20)
+            control.setValue(2)
+        depth_row.addWidget(QtWidgets.QLabel('Previous keys'))
+        depth_row.addWidget(self.onion_before)
+        depth_row.addWidget(QtWidgets.QLabel('Next keys'))
+        depth_row.addWidget(self.onion_after)
+        onion.addLayout(depth_row)
+        opacity_row = QtWidgets.QHBoxLayout()
+        self.onion_opacity = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.onion_opacity.setRange(0, 100)
+        self.onion_opacity.setValue(35)
+        self.onion_opacity_label = QtWidgets.QLabel('35%')
+        opacity_row.addWidget(QtWidgets.QLabel('Opacity'))
+        opacity_row.addWidget(self.onion_opacity, 1)
+        opacity_row.addWidget(self.onion_opacity_label)
+        onion.addLayout(opacity_row)
+        self.onion_falloff = QtWidgets.QCheckBox('Fade distant keys')
+        self.onion_falloff.setChecked(True)
+        onion.addWidget(self.onion_falloff)
+        self.onion_tint = QtWidgets.QCheckBox('Color previous / next')
+        self.onion_tint.setChecked(True)
+        onion.addWidget(self.onion_tint)
+        onion.addWidget(hint('Previous keys are warm; next keys are cool. '
+                            'Held notes remain editable only on their own key.'))
         draw_page.addWidget(hint(
             'Notes hold forward until the next annotated frame.'))
         draw_page.addStretch(1)
@@ -1162,6 +1222,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
         self.draw_color_picker.currentColorChanged.connect(self._set_drawing_color)
         for mode, button in (
+                ('select', self.select_mode_btn),
                 ('brush', self.brush_mode_btn),
                 ('eraser', self.eraser_mode_btn),
                 ('rectangle', self.rect_mode_btn),
@@ -1185,6 +1246,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.undo_drawing_btn.clicked.connect(self.surface.undo_drawing_stroke)
         self.prev_drawing_btn.clicked.connect(lambda: self._step_drawing(-1))
         self.next_drawing_btn.clicked.connect(lambda: self._step_drawing(1))
+        for control in (self.onion_enable, self.onion_falloff, self.onion_tint):
+            control.toggled.connect(self._update_onion_skin)
+        for control in (self.onion_before, self.onion_after, self.onion_opacity):
+            control.valueChanged.connect(self._update_onion_skin)
         self.import_notes_btn.clicked.connect(self._import_notes)
         self.export_notes_btn.clicked.connect(self._export_notes)
         self.surface.drawingChanged.connect(self._on_drawing_changed)
@@ -1247,6 +1312,52 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self._shortcuts.append(shortcut)
 
     # --------------------------------------------------------- media load
+    def _choose_open(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Open media or review', self._notes_directory(),
+            'Media / FrameReviewer Notes (*.json *.mp4 *.mov *.mkv *.webm *.avi *.m4v *.jpg *.jpeg *.png *.tga *.exr);;All files (*)')
+        if path:
+            self._load_path(path)
+
+    def _playblast_current_shot(self):
+        """Capture Maya's active camera/time-slider range as a JPEG sequence."""
+        if cmds is None:
+            QtWidgets.QMessageBox.warning(self, 'Playblast unavailable', 'Maya is required.')
+            return
+        if self._closed or (self._export_job is not None and self._export_job.isRunning()):
+            return
+        folder = tempfile.mkdtemp(prefix='framereviewer_playblast_')
+        prefix = os.path.join(folder, 'shot')
+        try:
+            # Prefer the current Camera Sequencer shot. Outside a sequencer
+            # shot Maya's playblast defaults to the playback slider range.
+            current = float(cmds.currentTime(query=True))
+            shots = []
+            for shot in cmds.ls(type='shot') or []:
+                start = float(cmds.shot(shot, query=True, startTime=True))
+                end = float(cmds.shot(shot, query=True, endTime=True))
+                if start <= current <= end:
+                    shots.append((end - start, start, end))
+            range_args = {}
+            if shots:
+                _, start, end = min(shots)
+                range_args = {'startTime': start, 'endTime': end}
+            # Maya's image playblast is portable across Linux, macOS and Windows;
+            # FrameReviewer already supports numbered image sequences.
+            result = cmds.playblast(
+                format='image', compression='jpg', filename=prefix,
+                forceOverwrite=True, viewer=False, showOrnaments=False,
+                offScreen=True, percent=100, quality=90, clearCache=True,
+                sequenceTime=False, **range_args)
+            files = sorted(glob.glob(prefix + '*.jpg') + glob.glob(prefix + '*.jpeg'))
+            if not files and result:
+                files = sorted(glob.glob(os.path.splitext(str(result))[0] + '*.jpg'))
+            if not files:
+                raise RuntimeError('Maya did not create playblast frames.')
+            self._load_path(files[0])
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, 'Playblast failed', str(exc))
+
     def _choose_media(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, 'Import media', os.path.expanduser('~'),
@@ -1297,6 +1408,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
     def _load_path(self, path):
         """Shared entry point for the file dialog, the placeholder, and drops."""
+        if path.lower().endswith('.json'):
+            self._open_notes_path(path)
+            return
         if self._closed or (self._export_job is not None and self._export_job.isRunning()):
             return
         try:
@@ -1803,6 +1917,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._current_draw_mode = mode
         self.surface.set_draw_mode(mode)
         labels = {
+            'select': ('Selection', 'Size'),
             'brush': ('Brush Tip', 'Size'),
             'eraser': ('Eraser Tip', 'Diameter'),
             'rectangle': ('Rectangle Outline', 'Width'),
@@ -1816,14 +1931,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_width_slider.blockSignals(True)
         self.draw_width.setRange(1, maximum)
         self.draw_width_slider.setRange(1, maximum)
-        self.draw_width.setValue(self._draw_tool_sizes[mode])
-        self.draw_width_slider.setValue(self._draw_tool_sizes[mode])
+        self.draw_width.setValue(self._draw_tool_sizes.get(mode, 3))
+        self.draw_width_slider.setValue(self._draw_tool_sizes.get(mode, 3))
         self.draw_width_slider.blockSignals(False)
         self.draw_width.blockSignals(False)
-        self.draw_color_panel.setVisible(mode != 'eraser')
-        self.draw_opacity_panel.setVisible(mode != 'eraser')
+        self.draw_tip_title.setVisible(mode != 'select')
+        self.draw_width.setVisible(mode != 'select')
+        self.draw_width_slider.setVisible(mode != 'select')
+        self.draw_width_caption.setVisible(mode != 'select')
+        self.draw_color_panel.setVisible(mode not in ('eraser', 'select'))
+        self.draw_opacity_panel.setVisible(mode not in ('eraser', 'select'))
         self.draw_smoothing_panel.setVisible(mode == 'brush')
-        self.pressure_opacity_check.setVisible(mode != 'eraser')
+        self.pressure_opacity_check.setVisible(mode not in ('eraser', 'select'))
         self._update_brush_style()
 
     def _on_tablet_pressure(self, pressure):
@@ -1855,6 +1974,31 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                       [frame for frame in frames if frame > current])
         if candidates:
             self._scrub(max(candidates) if direction < 0 else min(candidates))
+
+    def _toggle_onion(self, enabled):
+        self.onion_enable.setChecked(bool(enabled))
+
+    def _update_onion_skin(self, *_):
+        value = self.onion_opacity.value()
+        self.onion_opacity_label.setText('{}%'.format(value))
+        self.act_onion.blockSignals(True)
+        self.act_onion.setChecked(self.onion_enable.isChecked())
+        self.act_onion.blockSignals(False)
+        self.surface.set_onion_skin(
+            enabled=self.onion_enable.isChecked(),
+            before=self.onion_before.value(),
+            after=self.onion_after.value(),
+            opacity=value / 100.0,
+            falloff=self.onion_falloff.isChecked(),
+            tint=self.onion_tint.isChecked())
+        for key, setting in (
+                ('enabled', self.onion_enable.isChecked()),
+                ('before', self.onion_before.value()),
+                ('after', self.onion_after.value()),
+                ('opacity', value),
+                ('falloff', self.onion_falloff.isChecked()),
+                ('tint', self.onion_tint.isChecked())):
+            self.settings.set('onion/' + key, setting)
 
     def _notes_directory(self):
         if self.info is not None and self.info.path:
@@ -1900,6 +2044,57 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.status_lbl.setText(
             'Exported {} annotation key{}.'.format(
                 len(drawings), '' if len(drawings) == 1 else 's'))
+
+    def _open_notes_path(self, path):
+        """Restore the media and annotations recorded in a notes JSON."""
+        if self._closed or (self._export_job is not None and self._export_job.isRunning()):
+            return
+        try:
+            if os.path.getsize(path) > 20 * 1024 * 1024:
+                raise ValueError('The notes file is larger than 20 MB.')
+            with open(path, 'r') as stream:
+                payload = json.load(stream)
+            if not isinstance(payload, dict) or payload.get('format') != 'frame-review-notes':
+                raise ValueError('This is not a FrameReviewer notes file.')
+            if int(payload.get('version', 0)) != 1:
+                raise ValueError('Unsupported notes file version.')
+            source = payload.get('source')
+            if not isinstance(source, dict) or not isinstance(source.get('path'), str) or not source['path'].strip():
+                raise ValueError('The notes file has no source media path.')
+            entries = payload.get('notes', [])
+            if not isinstance(entries, list):
+                raise ValueError('The notes field must be a list.')
+            drawings = {}
+            for entry in entries:
+                if not isinstance(entry, dict) or 'frame' not in entry:
+                    raise ValueError('Invalid annotation entry.')
+                frame = int(entry['frame'])
+                if frame < 0 or frame in drawings:
+                    raise ValueError('Invalid or duplicate frame.')
+                strokes = entry.get('strokes', [])
+                if not isinstance(strokes, list):
+                    raise ValueError('Invalid annotation strokes.')
+                drawings[frame] = strokes
+            original = os.path.expanduser(os.path.expandvars(source['path']))
+            folder = os.path.dirname(os.path.abspath(path))
+            paths = ([os.path.join(folder, original)] if not os.path.isabs(original) else [])
+            paths += [original, os.path.join(folder, os.path.basename(original))]
+            media = next((candidate for candidate in paths if os.path.isfile(candidate)), None)
+            if media is None:
+                raise IOError('Source media missing: ' + source['path'])
+            info = ffmpegtools.probe(self.ffprobe, QtGui.QImageReader, media)
+        except (IOError, OSError, TypeError, ValueError, KeyError, OverflowError) as exc:
+            QtWidgets.QMessageBox.critical(self, 'Open notes failed', str(exc))
+            return
+        self._load(info)
+        try:
+            self.surface.set_drawing_data(drawings, replace=True)
+        except (TypeError, ValueError) as exc:
+            QtWidgets.QMessageBox.critical(self, 'Open notes failed', str(exc))
+            return
+        self._remember_recent(path)
+        self.status_lbl.setText('Opened {} with {} note keys.'.format(
+            os.path.basename(media), len(drawings)))
 
     def _import_notes(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
