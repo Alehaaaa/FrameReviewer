@@ -140,6 +140,18 @@ def probe(ffprobe, qimage_reader, path):
         if size.isValid():
             return MediaInfo(path, size.width(), size.height(), 24.0,
                              len(files), sequence_files=files)
+        # Qt cannot size some formats (notably EXR). Keep treating it as an
+        # image sequence, but read one frame's dimensions from ffprobe.
+        try:
+            dims = run([ffprobe, '-v', 'error', '-select_streams', 'v:0',
+                        '-show_entries', 'stream=width,height',
+                        '-of', 'default=noprint_wrappers=1', path])
+            meta = dict(line.split('=', 1) for line in dims.splitlines()
+                        if '=' in line)
+            return MediaInfo(path, int(meta['width']), int(meta['height']),
+                             24.0, len(files), sequence_files=files)
+        except (RuntimeError, KeyError, ValueError):
+            pass
 
     out = run([ffprobe, '-v', 'error', '-select_streams', 'v:0',
                '-show_entries', 'stream=width,height,avg_frame_rate,nb_frames,duration',

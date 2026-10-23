@@ -11,7 +11,7 @@ from __future__ import absolute_import
 import collections
 
 from .qtcompat import QtCore, QtGui, Signal
-from . import utils
+from . import utils, exr
 
 DECODE_WIDTH = 960
 CACHE_BYTES = 144 * 1024 * 1024
@@ -34,17 +34,24 @@ class SequenceSource(QtCore.QObject):
             return self._cache[frame]
         if not (0 <= frame < len(self._files)):
             return None
-        reader = QtGui.QImageReader(self._files[frame])
-        original = reader.size()
-        if original.isValid() and original.width() > DECODE_WIDTH:
-            target_height = max(1, int(original.height() * DECODE_WIDTH / original.width()))
-            reader.setScaledSize(QtCore.QSize(DECODE_WIDTH, target_height))
-        image = reader.read()
-        if image.isNull():
-            return None
-        if image.width() > DECODE_WIDTH:
-            image = image.scaledToWidth(DECODE_WIDTH, QtCore.Qt.SmoothTransformation)
-        pixmap = QtGui.QPixmap.fromImage(image)
+        path = self._files[frame]
+        if exr.is_exr(path):
+            # Qt cannot read EXR; decode multi-channel float through OpenEXR.
+            pixmap = exr.read_pixmap(path, DECODE_WIDTH)
+            if pixmap is None or pixmap.isNull():
+                return None
+        else:
+            reader = QtGui.QImageReader(path)
+            original = reader.size()
+            if original.isValid() and original.width() > DECODE_WIDTH:
+                target_height = max(1, int(original.height() * DECODE_WIDTH / original.width()))
+                reader.setScaledSize(QtCore.QSize(DECODE_WIDTH, target_height))
+            image = reader.read()
+            if image.isNull():
+                return None
+            if image.width() > DECODE_WIDTH:
+                image = image.scaledToWidth(DECODE_WIDTH, QtCore.Qt.SmoothTransformation)
+            pixmap = QtGui.QPixmap.fromImage(image)
         self._cache[frame] = pixmap
         self._cache_bytes += pixmap.width() * pixmap.height() * 4
         while len(self._cache) > 32 or self._cache_bytes > CACHE_BYTES:

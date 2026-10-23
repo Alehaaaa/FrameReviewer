@@ -14,7 +14,7 @@ import os
 import math
 
 from .qtcompat import QtCore, QtGui, QtWidgets, Signal
-from . import style, utils
+from . import style, utils, color
 
 
 class PlaybackSurface(QtWidgets.QGraphicsView):
@@ -88,7 +88,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._selection_drag = None
         self._selection_box = QtWidgets.QGraphicsRectItem()
         self._selection_box.setZValue(35)
-        self._selection_box.setPen(QtGui.QPen(QtGui.QColor('#64c9ff'), 1, QtCore.Qt.DashLine))
+        self._selection_box.setPen(QtGui.QPen(QtGui.QColor(style.SELECTION), 1, QtCore.Qt.DashLine))
         self._selection_box.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
         self._selection_box.setAcceptedMouseButtons(QtCore.Qt.NoButton)
         self.scene().addItem(self._selection_box)
@@ -97,16 +97,16 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         for handle in ('nw', 'ne', 'sw', 'se', 'rotate'):
             item = QtWidgets.QGraphicsEllipseItem()
             item.setZValue(36)
-            item.setBrush(QtGui.QColor('#64c9ff') if handle != 'rotate'
-                          else QtGui.QColor('#f8c26b'))
-            item.setPen(QtGui.QPen(QtGui.QColor('#162632')))
+            item.setBrush(QtGui.QColor(style.SELECTION) if handle != 'rotate'
+                          else QtGui.QColor(style.HANDLE_ROTATE))
+            item.setPen(QtGui.QPen(QtGui.QColor(style.HANDLE_OUTLINE)))
             item.setAcceptedMouseButtons(QtCore.Qt.NoButton)
             self.scene().addItem(item)
             item.hide()
             self._selection_handles[handle] = item
         self._selection_marquee = QtWidgets.QGraphicsRectItem()
         self._selection_marquee.setZValue(34)
-        self._selection_marquee.setPen(QtGui.QPen(QtGui.QColor('#64c9ff'), 1, QtCore.Qt.DashLine))
+        self._selection_marquee.setPen(QtGui.QPen(QtGui.QColor(style.SELECTION), 1, QtCore.Qt.DashLine))
         self._selection_marquee.setBrush(QtGui.QColor(100, 201, 255, 24))
         self._selection_marquee.setAcceptedMouseButtons(QtCore.Qt.NoButton)
         self.scene().addItem(self._selection_marquee)
@@ -124,7 +124,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._erasing = False
         self._erase_changed = False
         self._erase_last_point = None
-        self._pen_color = QtGui.QColor('#ef5350')
+        self._pen_color = QtGui.QColor(style.DRAW_DEFAULT)
         self._pen_width = 3.0
         # Pen widths are cosmetic viewport pixels, independent of the native
         # resolution. Give the eraser its own screen-pixel diameter.
@@ -137,7 +137,9 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._draw_mode = 'brush'
         self._shape_constrain = False
         self._tablet_active = False
-        self._safe_areas = False
+        self._composition_mode = 'off'
+        self._source_pixmap = None          # ungraded frame, for re-grading
+        self._color_params = None           # active display color correction
         self._guides = QtWidgets.QGraphicsItemGroup()
         self._guides.setZValue(8)
         self.scene().addItem(self._guides)
@@ -243,10 +245,23 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         """Show a pixmap (live frame or poster still), scaled+flipped to native."""
         if pixmap is None or pixmap.isNull():
             return
-        self.frame_item.setPixmap(pixmap)
+        self._source_pixmap = pixmap
+        self.frame_item.setPixmap(self._graded(pixmap))
         self._apply_frame_transform()
 
+    def set_color_correction(self, params):
+        """Apply a non-destructive display grade (dict), or None to disable."""
+        self._color_params = params
+        if self._source_pixmap is not None and not self._source_pixmap.isNull():
+            self.frame_item.setPixmap(self._graded(self._source_pixmap))
+
+    def _graded(self, pixmap):
+        if not self._color_params:
+            return pixmap
+        return color.grade_pixmap(pixmap, self._color_params)
+
     def clear(self):
+        self._source_pixmap = None
         self.frame_item.setPixmap(QtGui.QPixmap())
         self.set_tracked_quad(None)
         self.set_crop(None)
@@ -473,7 +488,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
                 points = stroke.get('points', [])
                 if not points:
                     continue
-                color = str(stroke.get('color', '#ef5350'))
+                color = str(stroke.get('color', style.DRAW_DEFAULT))
                 width = max(0.5, float(stroke.get('width', 3.0)))
                 opacity = max(0.01, float(stroke.get('opacity', 1.0)))
                 contours = self._stroke_polylines(stroke)
@@ -508,7 +523,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
                     continue
                 clean_strokes.append(dict(
                     points=points,
-                    color=str(stroke.get('color', '#ef5350')),
+                    color=str(stroke.get('color', style.DRAW_DEFAULT)),
                     width=max(1.0, float(stroke.get('width', 3.0))),
                     opacity=utils.clamp(float(stroke.get('opacity', 1.0)), 0.01, 1.0),
                     pressure_size=bool(stroke.get('pressure_size', False)),
@@ -619,9 +634,9 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         previous_frames = (previous[-self._onion_before:]
                            if self._onion_before else [])
         following_frames = following[:self._onion_after]
-        for frames, tint_color in ((previous_frames, '#ff735c'),
-                                   (following_frames, '#54c9ed')):
-            frames = list(reversed(frames)) if tint_color == '#ff735c' else frames
+        for frames, tint_color in ((previous_frames, style.ONION_PREV),
+                                   (following_frames, style.ONION_NEXT)):
+            frames = list(reversed(frames)) if tint_color == style.ONION_PREV else frames
             for distance, key in enumerate(frames, 1):
                 factor = (1.0 / distance if self._onion_falloff else 1.0)
                 for stroke in self._drawings[key]:
@@ -930,7 +945,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             x1, y1, p1 = points[0]
             x2, y2, p2 = points[-1]
             width, opacity = values((p1 + p2) * 0.5)
-            color = QtGui.QColor(stroke.get('color', '#ef5350'))
+            color = QtGui.QColor(stroke.get('color', style.DRAW_DEFAULT))
             color.setAlphaF(opacity)
             pen = QtGui.QPen(color, width, QtCore.Qt.SolidLine,
                              QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin)
@@ -974,7 +989,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
                 return group
             x, y, pressure = points[0]
             width, opacity = values(pressure)
-            color = QtGui.QColor(stroke.get('color', '#ef5350'))
+            color = QtGui.QColor(stroke.get('color', style.DRAW_DEFAULT))
             color.setAlphaF(opacity)
             # Match the freehand stroke's cosmetic, round-cap pen exactly.
             # A tiny segment produces a stable dot without scene-scale jumps.
@@ -990,7 +1005,7 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             x1, y1, p1 = first
             x2, y2, p2 = second
             width, opacity = values((p1 + p2) * 0.5)
-            color = QtGui.QColor(stroke.get('color', '#ef5350'))
+            color = QtGui.QColor(stroke.get('color', style.DRAW_DEFAULT))
             color.setAlphaF(opacity)
             path = QtGui.QPainterPath(QtCore.QPointF(x1, y1))
             path.lineTo(QtCore.QPointF(x2, y2))
@@ -1270,34 +1285,69 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         self._erase_last_point = None
         self._eraser_pressure = 1.0
 
+    # Composition guide modes shown over the frame. 'safe' reproduces the old
+    # safe-areas-and-center behaviour; the rest are standard framing guides.
+    COMPOSITION_MODES = ('off', 'thirds', 'golden', 'diagonal', 'center', 'safe')
+
     def set_safe_areas_visible(self, visible):
-        self._safe_areas = bool(visible)
+        """Back-compat: map the old boolean onto the composition modes."""
+        self.set_composition_mode('safe' if visible else 'off')
+
+    def set_composition_mode(self, mode):
+        mode = mode if mode in self.COMPOSITION_MODES else 'off'
+        if mode == self._composition_mode:
+            return
+        self._composition_mode = mode
         self._rebuild_guides()
+
+    def composition_mode(self):
+        return self._composition_mode
 
     def _rebuild_guides(self):
         for item in self._guide_items:
             item.setParentItem(None)
             self.scene().removeItem(item)
         self._guide_items = []
-        if not self._safe_areas or self._native.isEmpty():
+        mode = self._composition_mode
+        if mode == 'off' or self._native.isEmpty():
             return
         bounds = QtCore.QRectF(0, 0, self._native.width(), self._native.height())
         pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 130))
         pen.setCosmetic(True)
         pen.setStyle(QtCore.Qt.DashLine)
-        for scale in (0.8, 0.9):
+
+        def add_line(x1, y1, x2, y2):
+            item = QtWidgets.QGraphicsLineItem(QtCore.QLineF(x1, y1, x2, y2), self._guides)
+            item.setPen(pen)
+            self._guide_items.append(item)
+
+        def add_rect(scale):
             w, h = bounds.width() * scale, bounds.height() * scale
             rect = QtCore.QRectF((bounds.width() - w) / 2.0,
                                  (bounds.height() - h) / 2.0, w, h)
             item = QtWidgets.QGraphicsRectItem(rect, self._guides)
             item.setPen(pen)
             self._guide_items.append(item)
-        center = bounds.center()
-        for line in (QtCore.QLineF(center.x(), 0, center.x(), bounds.height()),
-                     QtCore.QLineF(0, center.y(), bounds.width(), center.y())):
-            item = QtWidgets.QGraphicsLineItem(line, self._guides)
-            item.setPen(pen)
-            self._guide_items.append(item)
+
+        width, height = bounds.width(), bounds.height()
+        if mode in ('thirds', 'golden'):
+            fractions = ((1 / 3.0, 2 / 3.0) if mode == 'thirds'
+                         else (0.382, 0.618))
+            for fx in fractions:
+                add_line(width * fx, 0, width * fx, height)
+            for fy in fractions:
+                add_line(0, height * fy, width, height * fy)
+        elif mode == 'diagonal':
+            add_line(0, 0, width, height)
+            add_line(width, 0, 0, height)
+        elif mode == 'center':
+            add_line(width / 2.0, 0, width / 2.0, height)
+            add_line(0, height / 2.0, width, height / 2.0)
+        elif mode == 'safe':
+            for scale in (0.8, 0.9):
+                add_rect(scale)
+            add_line(width / 2.0, 0, width / 2.0, height)
+            add_line(0, height / 2.0, width, height / 2.0)
 
     # -- view behaviour ---------------------------------------------------
     def _fit(self):

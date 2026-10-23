@@ -14,7 +14,7 @@ import tempfile
 
 from .qtcompat import QtCore, QtWidgets, Signal
 from .ffmpegtools import _no_window_kwargs, media_environment
-from . import utils, tracking
+from . import utils, tracking, style
 
 JPEG_QUALITY = 98
 
@@ -52,7 +52,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
         self.warning = QtWidgets.QLabel()
         self.warning.setWordWrap(True)
-        self.warning.setStyleSheet('color:#d98b4a;')
+        self.warning.setStyleSheet('color:%s;' % style.WARNING)
         self.warning.hide()
         root.addWidget(self.warning)
         self.overwrite_cb = QtWidgets.QCheckBox('Overwrite existing selected outputs')

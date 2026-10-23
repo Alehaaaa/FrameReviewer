@@ -33,6 +33,9 @@ from .export import ExportOptionsDialog, ExportJob
 from .shotgrid_ui import ShotGridPanel
 from .settings import Settings
 from .undo import UndoStack
+from . import scene_state
+from .scene_state import ScenePersistence
+from .color import ColorCorrectionDialog
 
 THUMB_LANE_H = 36
 SPEEDS = (0.25, 0.5, 1.0, 1.5, 2.0)
@@ -86,6 +89,133 @@ class CompactStack(QtWidgets.QStackedWidget):
         return page.minimumSizeHint() if page is not None else QtCore.QSize()
 
 
+def _menu_item_option(widget, text='', selected=False):
+    """A QStyleOptionMenuItem initialised for drawing one item through QStyle."""
+    option = QtWidgets.QStyleOptionMenuItem()
+    option.initFrom(widget)
+    option.rect = widget.rect()
+    option.menuRect = widget.rect()
+    option.menuItemType = QtWidgets.QStyleOptionMenuItem.Normal
+    option.checkType = QtWidgets.QStyleOptionMenuItem.NotCheckable
+    option.text = text
+    option.menuHasCheckableItems = False
+    option.maxIconWidth = 0
+    try:
+        option.reservedShortcutWidth = 0
+    except AttributeError:
+        option.tabWidth = 0                 # older Qt
+    option.state = QtWidgets.QStyle.State_Enabled
+    if selected:
+        option.state |= (QtWidgets.QStyle.State_Selected |
+                         QtWidgets.QStyle.State_MouseOver)
+    return option
+
+
+class _OptionBoxRow(QtWidgets.QWidget):
+    """One menu row painted as a single native menu item with an option box.
+
+    Painting the whole item through QStyle (``CE_MenuItem``) in one widget gives
+    the exact platform text margin and a highlight that spans edge to edge, then
+    the option-box square is drawn on top at the far right. A left release hit
+    tests which half was clicked. One widget avoids the seam, the gap at the
+    right edge and the text shift that two sub-widgets produced.
+    """
+    primaryClicked = Signal()
+    optionsClicked = Signal()
+    BOX_WIDTH = 30
+
+    def __init__(self, text, parent=None):
+        super(_OptionBoxRow, self).__init__(parent)
+        self._text = text
+        self._hover = False
+        self.setMouseTracking(True)
+        self.setSizePolicy(QtWidgets.QSizePolicy.MinimumExpanding,
+                           QtWidgets.QSizePolicy.Fixed)
+
+    def sizeHint(self):
+        option = _menu_item_option(self, self._text)
+        metrics = self.fontMetrics()
+        content = QtCore.QSize(
+            metrics.horizontalAdvance(self._text) + 24 + self.BOX_WIDTH,
+            metrics.height())
+        return self.style().sizeFromContents(
+            QtWidgets.QStyle.CT_MenuItem, option, content, self)
+
+    def _box_rect(self):
+        return QtCore.QRect(self.width() - self.BOX_WIDTH, 0,
+                            self.BOX_WIDTH, self.height())
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            if self._box_rect().contains(event.pos()):
+                self.optionsClicked.emit()
+            elif self.rect().contains(event.pos()):
+                self.primaryClicked.emit()
+        super(_OptionBoxRow, self).mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QtWidgets.QStylePainter(self)
+        # Full-width menu item: highlight spans edge to edge, text sits on the
+        # platform's menu gutter exactly like the neighbouring items. The menu
+        # insets a widget-action's rect by ~1px; overdraw past our own edges
+        # (clipped to the menu) so the highlight reaches the same extent as the
+        # native items around it.
+        option = _menu_item_option(self, self._text, self._hover)
+        # Extend only the right edge: CE_MenuItem anchors its text to rect.left,
+        # so growing the right keeps the text aligned with the other items while
+        # the highlight reaches the same right extent they do.
+        option.rect = self.rect().adjusted(0, 0, 2, 0)
+        option.menuRect = option.rect
+        painter.drawControl(QtWidgets.QStyle.CE_MenuItem, option)
+        # The option box square, drawn on top at the far right.
+        box = self._box_rect()
+        color = (self.palette().highlightedText().color() if self._hover
+                 else self.palette().text().color())
+        pen = QtGui.QPen(color)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        center = box.center()
+        painter.drawRect(center.x() - 5, center.y() - 5, 10, 10)
+        painter.drawRect(center.x() - 2, center.y() - 2, 4, 4)
+
+
+class OptionBoxAction(QtWidgets.QWidgetAction):
+    """A menu action with a native-style option box (Maya's square on the right).
+
+    Subclassing QWidgetAction and building the widget in ``createWidget`` lets a
+    QMenu own the widget's lifetime (each menu that shows the action gets its own
+    instance), which avoids the dangling-QMenu crash of a hand-placed widget.
+    """
+    primaryTriggered = Signal()
+    optionsTriggered = Signal()
+
+    def __init__(self, text, parent=None):
+        super(OptionBoxAction, self).__init__(parent)
+        self._text = text
+
+    def createWidget(self, parent):
+        row = _OptionBoxRow(self._text, parent)
+        row.primaryClicked.connect(lambda: self._fire(self.primaryTriggered))
+        row.optionsClicked.connect(lambda: self._fire(self.optionsTriggered))
+        return row
+
+    def _fire(self, signal):
+        # Close the open menu without touching a possibly-dead QMenu reference,
+        # then emit so the receiver can run (and open dialogs) cleanly.
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is not None:
+            popup.close()
+        signal.emit()
+
+
 class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
     _instance = None
     _object_name = 'FramestoreFrameReviewer'
@@ -102,6 +232,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.ffprobe = ffmpegtools.find_binary('ffprobe')
 
         self.info = None
+        # A/B review: a user-set reference clip and the latest playblast, which
+        # the Toggle Reference action swaps the viewer between.
+        self._reference_path = None
+        self._playblast_path = None
+        # True while restoring saved scene state, so loading media then does not
+        # overwrite the scene's stored state with the half-restored values.
+        self._restoring_scene_state = False
         self._closed = False
         self._shutting_down = False
         self._shutdown_clean = None
@@ -162,6 +299,11 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         )
 
         self.surface = PlaybackSurface()
+        # Keyboard shortcuts are window-subtree scoped (WidgetWithChildrenShortcut)
+        # so they work while docked. That needs a focus target inside the panel:
+        # let both the window and the viewer accept focus.
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.surface.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._build_ui()
         # Flat, non-native buttons everywhere in the rail and side panel: the
         # normal state declares an explicit background so Qt does not fall back
@@ -186,17 +328,27 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             QWidget#vcSide QPushButton:hover {{ background: {hover}; }}
             QWidget#vcSide QPushButton:pressed {{ background: {down}; }}
             QWidget#vcSide QPushButton:disabled {{ color: {dim}; }}
-            QWidget#vcSide QPushButton[role="primary"] {{ background: #4b555c;
-                color: {text}; border-color: #596b77; font-weight: bold; }}
-            QWidget#vcSide QPushButton[role="primary"]:hover {{ background: #53616a; }}
-            QWidget#vcSide QPushButton[role="danger"] {{ background: #554545;
-                color: #cbbbbb; border-color: #684b4b; }}
-            QWidget#vcSide QPushButton[role="danger"]:hover {{ background: #604b4b; }}
+            QWidget#vcSide QPushButton[role="primary"] {{ background: {primary};
+                color: {text}; border-color: {primary_border}; font-weight: bold; }}
+            QWidget#vcSide QPushButton[role="primary"]:hover {{ background: {primary_hover}; }}
+            QWidget#vcSide QPushButton[role="danger"] {{ background: {danger};
+                color: {danger_text}; border-color: {danger_border}; }}
+            QWidget#vcSide QPushButton[role="danger"]:hover {{ background: {danger_hover}; }}
+            /* Utility tier: least-important actions read quieter and smaller
+               than standard/primary buttons so weight tracks importance. */
+            QWidget#vcSide QPushButton[role="utility"] {{ background: transparent;
+                color: {dim}; border: 1px solid transparent;
+                min-height: 21px; padding: 1px 8px; font-weight: normal; }}
+            QWidget#vcSide QPushButton[role="utility"]:hover {{ background: {hover};
+                color: {text}; border-color: {border}; }}
+            QWidget#vcSide QPushButton[role="utility"]:pressed {{ background: {down}; }}
+            QWidget#vcSide QPushButton[role="utility"]:disabled {{
+                color: {dim}; background: transparent; border-color: transparent; }}
             QWidget#vcSide QToolButton[toolMode="true"] {{ background: {control};
                 border: 1px solid {border}; border-radius: 4px; }}
             QWidget#vcSide QToolButton[toolMode="true"]:hover {{ background: {hover}; }}
             QWidget#vcSide QToolButton[toolMode="true"]:checked {{
-                background: #465159; border-color: #596f7d; }}
+                background: {toolmode}; border-color: {toolmode_border}; }}
             QWidget#vcSide QStackedWidget, QWidget#vcSide QScrollArea {{
                 background: transparent; border: none; }}
             QWidget#vcSide #vcPageBody {{ background: transparent; }}
@@ -214,7 +366,11 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         '''.format(panel=style.PANEL, border=style.BORDER, hover=style.CONTROL_HOVER,
                    accent=style.ACCENT, accent_hi=style.ACCENT_HI, control=style.CONTROL,
                    down=style.CONTROL_DOWN, text=style.TEXT, dim=style.TEXT_DIM,
-                   bg=style.BG))
+                   bg=style.BG, primary=style.PRIMARY, primary_hover=style.PRIMARY_HOVER,
+                   primary_border=style.PRIMARY_BORDER, danger=style.DANGER,
+                   danger_hover=style.DANGER_HOVER, danger_text=style.DANGER_TEXT,
+                   danger_border=style.DANGER_BORDER, toolmode=style.TOOLMODE_CHECKED,
+                   toolmode_border=style.TOOLMODE_CHECKED_BORDER))
 
         self.player = Player(self.ffmpeg, self.surface, self)
         self.waveform_job = WaveformJob(self.ffmpeg, self)
@@ -236,6 +392,17 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._maya_read_timer = QtCore.QTimer(self)
         self._maya_read_timer.setSingleShot(True)
         self._maya_read_timer.timeout.connect(self._flush_maya_scrub)
+
+        # Save review state into the Maya scene on write; restore it on open.
+        self._scene_persistence = ScenePersistence(self)
+        # Debounced writer that keeps the scene's fileInfo current as review
+        # state changes, so any scene save (or window close) carries it and it
+        # travels with the file. ~1s after the last change, never during a load.
+        self._scene_state_timer = QtCore.QTimer(self)
+        self._scene_state_timer.setSingleShot(True)
+        self._scene_state_timer.setInterval(1000)
+        self._scene_state_timer.timeout.connect(self._write_scene_state)
+        self.color_dialog = None            # lazily created color-correction tool
 
         self._connect()
         self._restore_preferences()
@@ -260,6 +427,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._update_onion_skin()
         self._set_enabled(False)
         self.surface.set_placeholder_visible(True)
+        # Restore any media the current scene was reviewing (and arm the
+        # save/open callbacks for subsequent scene writes and opens).
+        self._scene_persistence.install()
+        self._restore_scene_state_on_launch()
 
     # ------------------------------------------------------------------ UI
     def _restore_preferences(self):
@@ -284,7 +455,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             act.setChecked(settings.get_bool(key, True))
         settings.set('ui/organized_layout_v2', True)
         self.act_crop.setChecked(settings.get_bool('view/crop_overlay', True))
-        self.safe_areas_check.setChecked(settings.get_bool('view/safe_areas', False))
+        composition_mode = settings.get_str(
+            'view/composition',
+            'safe' if settings.get_bool('view/safe_areas', False) else 'off')
+        composition_index = self.composition_combo.findData(composition_mode)
+        self.composition_combo.setCurrentIndex(max(0, composition_index))
+        self.surface.set_composition_mode(self.composition_combo.currentData())
         self._set_muted(settings.get_bool('playback/muted', False))
         self.volume_slider.setValue(
             int(utils.clamp(settings.get_int('playback/volume', 50), 0, 100)))
@@ -300,10 +476,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_width.setValue(self._draw_tool_sizes['brush'])
         self.pressure_size_check.setChecked(settings.get_bool('draw/pressure_size', True))
         self.pressure_opacity_check.setChecked(settings.get_bool('draw/pressure_opacity', False))
-        self._set_drawing_color(settings.get_str('draw/color', '#ef5350'))
+        self._set_drawing_color(settings.get_str('draw/color', style.DRAW_DEFAULT))
         self._set_draw_mode('brush')
         self.sync_player_to_maya.setChecked(settings.get_bool('sync/player_to_maya', True))
         self.sync_maya_to_player.setChecked(settings.get_bool('sync/maya_to_player', True))
+        self.sync_offset_spin.blockSignals(True)
+        self.sync_offset_spin.setValue(settings.get_int('sync/offset', 0))
+        self.sync_offset_spin.blockSignals(False)
         # The widget may start in its default state and never emit toggled.
         self.timeline.set_thumbnails_visible(self.act_thumbs.isChecked())
         self.timeline.set_waveform_visible(self.act_wave.isChecked())
@@ -333,7 +512,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             (self.act_transport, 'view/transport'),
             (self.act_statusbar, 'view/statusbar'),
             (self.act_crop, 'view/crop_overlay'),
-            (self.safe_areas_check, 'view/safe_areas'),
             (self.sync_player_to_maya, 'sync/player_to_maya'),
             (self.sync_maya_to_player, 'sync/maya_to_player'),
         ):
@@ -521,6 +699,21 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         return QtGui.QIcon(png if os.path.isfile(png) else
                            os.path.join(ICON_DIR, '{}.svg'.format(name)))
 
+    def _add_option_box_item(self, menu, text, primary_slot, option_slot):
+        """Add a menu row with a native-style option box (the square at right).
+
+        Qt's QMenu has no native ``optionBox`` like Maya's MEL menus, so an
+        OptionBoxAction renders one. The slots run deferred so the menu fully
+        unwinds (and any dialog opens cleanly) after the click.
+        """
+        action = OptionBoxAction(text, menu)
+        action.primaryTriggered.connect(
+            lambda: QtCore.QTimer.singleShot(0, primary_slot))
+        action.optionsTriggered.connect(
+            lambda: QtCore.QTimer.singleShot(0, option_slot))
+        menu.addAction(action)
+        return action
+
     def _build_menu(self):
         bar = QtWidgets.QMenuBar(self)
         # Keep the menu inside the panel. On macOS a window QMenuBar otherwise
@@ -536,6 +729,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 shortcuts = shortcut if isinstance(shortcut, (tuple, list)) else (shortcut,)
                 act.setShortcuts([QtGui.QKeySequence(value) for value in shortcuts])
                 act.setShortcutContext(QtCore.Qt.WidgetWithChildrenShortcut)
+                # A QAction added only to a menu scopes its shortcut to that
+                # (never-focused) menu. Docked in Maya, FrameReviewer is not the
+                # active top-level window, so the shortcut never resolves. Also
+                # registering the action on the window makes the shortcut fire
+                # whenever focus is anywhere inside the panel's widget tree.
+                self.addAction(act)
             if slot is not None:
                 if checkable:
                     act.toggled.connect(slot)
@@ -556,7 +755,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._populate_recent_menu()  # build once so it is never empty on show
         file_menu.addSeparator()
         self.act_import = action(file_menu, 'Import Media…', self._choose_media, shortcut='I')
-        action(file_menu, 'Playblast Current Shot…', self._playblast_current_shot)
+        self._add_option_box_item(
+            file_menu, 'Playblast Current Shot',
+            self._playblast_current_shot, self._show_playblast_options)
         notes_menu = file_menu.addMenu('Review Notes')
         action(notes_menu, 'Import Notes…', self._import_notes)
         action(notes_menu, 'Export Notes…', self._export_notes)
@@ -872,7 +1073,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_color_btn.setPopupMode(popup_mode)
         self.draw_color_menu = QtWidgets.QMenu(self.draw_color_btn)
         self.draw_color_picker = QtWidgets.QColorDialog(
-            QtGui.QColor('#ef5350'), self.draw_color_menu)
+            QtGui.QColor(style.DRAW_DEFAULT), self.draw_color_menu)
         no_buttons = getattr(QtWidgets.QColorDialog, 'NoButtons', None)
         non_native = getattr(QtWidgets.QColorDialog, 'DontUseNativeDialog', None)
         if hasattr(QtWidgets.QColorDialog, 'ColorDialogOption'):
@@ -886,11 +1087,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.draw_color_btn.setMenu(self.draw_color_menu)
         color_row.addWidget(self.draw_color_btn)
         self.draw_swatches = []
-        for color in ('#ef5350', '#f2b84b', '#ffffff', '#49a7ff', '#66d17a'):
+        for color in style.DRAW_SWATCHES:
             swatch = QtWidgets.QToolButton()
             swatch.setFixedSize(22, 22)
             swatch.setToolTip(color)
-            swatch.setStyleSheet('background:%s; border:1px solid #202020;' % color)
+            swatch.setStyleSheet('background:%s; border:1px solid %s;'
+                                 % (color, style.SWATCH_BORDER))
             swatch.setProperty('brushColor', color)
             self.draw_swatches.append(swatch)
             color_row.addWidget(swatch)
@@ -1077,8 +1279,21 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         review_page = page('review')
         overlays = section(review_page, 'Overlays', collapsible=True,
                            collapsed=True)
-        self.safe_areas_check = QtWidgets.QCheckBox('Safe areas and center guides')
-        overlays.addWidget(self.safe_areas_check)
+        composition_row = QtWidgets.QHBoxLayout()
+        composition_row.addWidget(QtWidgets.QLabel('Composition'))
+        self.composition_combo = QtWidgets.QComboBox()
+        for value, label in (('off', 'Off'), ('thirds', 'Rule of thirds'),
+                             ('golden', 'Golden ratio'), ('diagonal', 'Diagonals'),
+                             ('center', 'Center cross'), ('safe', 'Safe areas')):
+            self.composition_combo.addItem(label, value)
+        self.composition_combo.setToolTip('Framing guides drawn over the image')
+        composition_row.addWidget(self.composition_combo, 1)
+        overlays.addLayout(composition_row)
+        self.color_btn = QtWidgets.QPushButton('Color Correction…')
+        self.color_btn.setToolTip(
+            'Non-destructive display grade (exposure, contrast, saturation, '
+            'temperature); never alters exported media or notes')
+        overlays.addWidget(self.color_btn)
         self.review_thumbs_check = QtWidgets.QCheckBox('Thumbnail timeline')
         self.review_wave_check = QtWidgets.QCheckBox('Audio waveform')
         overlays.addWidget(self.review_thumbs_check)
@@ -1136,6 +1351,16 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         sg_scroll.setWidget(self.shotgrid_panel)
         self.tool_stack.addWidget(sg_scroll)
         self._tool_pages['shotgrid'] = sg_scroll
+
+        # Importance hierarchy: primary actions (Import, Blank Here, Track
+        # Forward, Export) stay prominent; these secondary/utility actions are
+        # demoted to the quiet, compact "utility" tier so they stop competing
+        # with the main action in each pane.
+        for button in (self.media_prev_marker_btn, self.media_next_marker_btn,
+                       self.clear_crop_btn, self.delete_selected_btn,
+                       self.clear_track_btn, self.zoom_out_btn, self.fit_btn,
+                       self.zoom_in_btn):
+            button.setProperty('role', 'utility')
         return side
 
     def _build_transport(self):
@@ -1213,6 +1438,28 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.sync_maya_to_player.setCheckable(True)
         self.sync_maya_to_player.setChecked(True)
         sync_menu.addAction(self.sync_maya_to_player)
+        # The frame offset belongs to the Sync workflow, so it lives inside the
+        # Sync button's menu rather than as a standalone widget that does
+        # nothing while Sync is off. Maya frame = video frame + offset.
+        sync_menu.addSeparator()
+        offset_row = QtWidgets.QWidget()
+        offset_layout = QtWidgets.QHBoxLayout(offset_row)
+        offset_layout.setContentsMargins(10, 4, 10, 6)
+        offset_layout.setSpacing(6)
+        offset_label = QtWidgets.QLabel('Frame offset')
+        self.sync_offset_spin = QtWidgets.QSpinBox()
+        self.sync_offset_spin.setRange(-1000000, 1000000)
+        self.sync_offset_spin.setValue(0)
+        self.sync_offset_spin.setMaximumWidth(90)
+        self.sync_offset_spin.setToolTip(
+            'Frames to shift the video against Maya (Maya frame = video frame '
+            '+ offset)')
+        offset_layout.addWidget(offset_label)
+        offset_layout.addStretch(1)
+        offset_layout.addWidget(self.sync_offset_spin)
+        offset_action = QtWidgets.QWidgetAction(sync_menu)
+        offset_action.setDefaultWidget(offset_row)
+        sync_menu.addAction(offset_action)
         self.sync_btn.setMenu(sync_menu)
 
         self.mute_btn = VolumeButton()
@@ -1355,6 +1602,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.loop_btn.toggled.connect(self.act_loop.setChecked)
         self.act_loop.toggled.connect(self.loop_btn.setChecked)
         self.sync_btn.toggled.connect(self._toggle_maya_sync)
+        self.sync_offset_spin.valueChanged.connect(self._on_sync_offset_changed)
         self.mute_btn.singleClicked.connect(self._show_volume_popup)
         self.mute_btn.doubleClicked.connect(self._toggle_audio_mute)
         self.volume_slider.valueChanged.connect(
@@ -1418,7 +1666,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.surface.annotationFramesChanged.connect(
             self.timeline.set_annotation_frames)
         self.surface.tabletPressureChanged.connect(self._on_tablet_pressure)
-        self.safe_areas_check.toggled.connect(self.surface.set_safe_areas_visible)
+        self.composition_combo.currentIndexChanged.connect(
+            lambda *_: self.surface.set_composition_mode(
+                self.composition_combo.currentData()))
+        self.composition_combo.currentIndexChanged.connect(
+            lambda *_: self.settings.set(
+                'view/composition', self.composition_combo.currentData()))
+        self.color_btn.clicked.connect(self._show_color_tool)
         self.review_thumbs_check.toggled.connect(self.act_thumbs.setChecked)
         self.act_thumbs.toggled.connect(self.review_thumbs_check.setChecked)
         self.review_wave_check.toggled.connect(self.act_wave.setChecked)
@@ -1465,6 +1719,72 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         if path:
             self._load_path(path)
 
+    def _show_playblast_options(self):
+        """Native-style option box for Playblast Current Shot.
+
+        A small Qt dialog mirroring the handful of Maya playblast settings
+        FrameReviewer uses, persisted and fed to :meth:`_playblast_current_shot`.
+        """
+        if cmds is None:
+            QtWidgets.QMessageBox.warning(self, 'Playblast unavailable', 'Maya is required.')
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Playblast Options')
+        form = QtWidgets.QFormLayout(dialog)
+
+        source_combo = QtWidgets.QComboBox()
+        source_combo.addItem('Current Camera Sequencer shot', 'shot')
+        source_combo.addItem('Playback range', 'range')
+        source_index = source_combo.findData(
+            self.settings.get_str('playblast/source', 'shot'))
+        source_combo.setCurrentIndex(max(0, source_index))
+
+        scale = QtWidgets.QSpinBox()
+        scale.setRange(10, 100)
+        scale.setSuffix(' %')
+        scale.setValue(self.settings.get_int('playblast/scale', 100))
+        quality = QtWidgets.QSpinBox()
+        quality.setRange(1, 100)
+        quality.setValue(self.settings.get_int('playblast/quality', 90))
+        ornaments = QtWidgets.QCheckBox('Show ornaments')
+        ornaments.setChecked(self.settings.get_bool('playblast/ornaments', False))
+        offscreen = QtWidgets.QCheckBox('Render off-screen')
+        offscreen.setChecked(self.settings.get_bool('playblast/offscreen', True))
+
+        form.addRow('Source', source_combo)
+        form.addRow('Scale', scale)
+        form.addRow('Quality', quality)
+        form.addRow('', ornaments)
+        form.addRow('', offscreen)
+
+        buttons = QtWidgets.QDialogButtonBox()
+        run_btn = buttons.addButton('Playblast', QtWidgets.QDialogButtonBox.AcceptRole)
+        buttons.addButton('Save', QtWidgets.QDialogButtonBox.ApplyRole)
+        buttons.addButton('Close', QtWidgets.QDialogButtonBox.RejectRole)
+        form.addRow(buttons)
+
+        def persist():
+            self.settings.set('playblast/source', source_combo.currentData())
+            self.settings.set('playblast/scale', int(scale.value()))
+            self.settings.set('playblast/quality', int(quality.value()))
+            self.settings.set('playblast/ornaments', bool(ornaments.isChecked()))
+            self.settings.set('playblast/offscreen', bool(offscreen.isChecked()))
+
+        def on_click(button):
+            role = buttons.buttonRole(button)
+            if role == QtWidgets.QDialogButtonBox.ApplyRole:
+                persist()
+            elif role == QtWidgets.QDialogButtonBox.AcceptRole:
+                persist()
+                dialog.accept()
+            else:
+                dialog.reject()
+
+        buttons.clicked.connect(on_click)
+        accepted = dialog.exec() if hasattr(dialog, 'exec') else dialog.exec_()
+        if accepted:
+            self._playblast_current_shot()
+
     def _playblast_current_shot(self):
         """Capture Maya's active camera/time-slider range as a JPEG sequence."""
         if cmds is None:
@@ -1472,29 +1792,36 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             return
         if self._closed or (self._export_job is not None and self._export_job.isRunning()):
             return
+        settings = self.settings
+        use_shot = settings.get_str('playblast/source', 'shot') != 'range'
+        percent = int(utils.clamp(settings.get_int('playblast/scale', 100), 10, 100))
+        quality = int(utils.clamp(settings.get_int('playblast/quality', 90), 1, 100))
+        show_ornaments = settings.get_bool('playblast/ornaments', False)
+        off_screen = settings.get_bool('playblast/offscreen', True)
         folder = tempfile.mkdtemp(prefix='framereviewer_playblast_')
         prefix = os.path.join(folder, 'shot')
         try:
             # Prefer the current Camera Sequencer shot. Outside a sequencer
             # shot Maya's playblast defaults to the playback slider range.
-            current = float(cmds.currentTime(query=True))
-            shots = []
-            for shot in cmds.ls(type='shot') or []:
-                start = float(cmds.shot(shot, query=True, startTime=True))
-                end = float(cmds.shot(shot, query=True, endTime=True))
-                if start <= current <= end:
-                    shots.append((end - start, start, end))
             range_args = {}
-            if shots:
-                _, start, end = min(shots)
-                range_args = {'startTime': start, 'endTime': end}
+            if use_shot:
+                current = float(cmds.currentTime(query=True))
+                shots = []
+                for shot in cmds.ls(type='shot') or []:
+                    start = float(cmds.shot(shot, query=True, startTime=True))
+                    end = float(cmds.shot(shot, query=True, endTime=True))
+                    if start <= current <= end:
+                        shots.append((end - start, start, end))
+                if shots:
+                    _, start, end = min(shots)
+                    range_args = {'startTime': start, 'endTime': end}
             # Maya's image playblast is portable across Linux, macOS and Windows;
             # FrameReviewer already supports numbered image sequences.
             result = cmds.playblast(
                 format='image', compression='jpg', filename=prefix,
-                forceOverwrite=True, viewer=False, showOrnaments=False,
-                offScreen=True, percent=100, quality=90, clearCache=True,
-                sequenceTime=False, **range_args)
+                forceOverwrite=True, viewer=False, showOrnaments=show_ornaments,
+                offScreen=off_screen, percent=percent, quality=quality,
+                clearCache=True, sequenceTime=False, **range_args)
             files = sorted(glob.glob(prefix + '*.jpg') + glob.glob(prefix + '*.jpeg'))
             if not files and result:
                 files = sorted(glob.glob(os.path.splitext(str(result))[0] + '*.jpg'))
@@ -1641,10 +1968,41 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._suspend_undo = False
         self._reset_undo()
 
+        # Put keyboard focus on the viewer so transport/tool shortcuts fire
+        # immediately after a clip loads, without a stray click first.
+        self.surface.setFocus()
+
+        # Record the new source into the scene's fileInfo right away.
+        self._schedule_scene_state_save()
+
+    def _schedule_scene_state_save(self):
+        """Queue a debounced write of review state into the scene's fileInfo."""
+        if (cmds is None or self._closed or
+                getattr(self, '_restoring_scene_state', False)):
+            return
+        self._scene_state_timer.start()
+
+    def _write_scene_state(self):
+        if (cmds is None or self._closed or
+                getattr(self, '_restoring_scene_state', False)):
+            return
+        scene_state.save_to_scene(self)
+
+    def _restore_scene_state_on_launch(self):
+        """On open, reload whatever media this scene stored."""
+        if cmds is None:
+            return
+        state = scene_state.load_scene_state()
+        if state is None:
+            return
+        QtCore.QTimer.singleShot(
+            0, lambda: None if self._closed else scene_state.apply_state(self, state))
+
     def _set_enabled(self, on):
         widgets = [self.timeline, self.in_spin, self.out_spin, self.first_btn, self.prev_btn,
                    self.play_btn, self.next_btn, self.last_btn, self.loop_btn,
-                   self.sync_btn, self.set_in_btn, self.set_out_btn,
+                   self.sync_btn, self.sync_offset_spin,
+                   self.set_in_btn, self.set_out_btn,
                    self.reset_range_btn, self.speed_combo,
                    self.fps_combo, self.out_w_le, self.out_h_le,
                    self.mute_btn, self.volume_slider, self.draw_color_btn,
@@ -1660,7 +2018,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                    self.blank_drawing_btn, self.delete_all_notes_btn,
                    self.prev_drawing_btn, self.next_drawing_btn,
                    self.import_notes_btn, self.export_notes_btn,
-                   self.safe_areas_check, self.fit_btn,
+                   self.composition_combo, self.color_btn, self.fit_btn,
                    self.zoom_out_btn, self.zoom_in_btn,
                    self.clear_crop_btn, self.crop_overlay_check,
                    self.review_thumbs_check, self.review_wave_check,
@@ -1717,6 +2075,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._last_maya_frame = maya_frame
         self._maya_sync_timer.start()
 
+    def _on_sync_offset_changed(self, *args):
+        self.settings.set('sync/offset', int(self.sync_offset_spin.value()))
+        if not self.sync_btn.isChecked() or self.info is None:
+            return
+        # Re-align immediately: force the next poll to accept Maya's frame, then
+        # nudge both directions so the new offset takes effect without waiting.
+        self._last_maya_frame = None
+        if self.sync_player_to_maya.isChecked():
+            self._sync_from_maya()
+        elif self.sync_maya_to_player.isChecked():
+            self._sync_maya_from_player(self.player.current_frame)
+
     def _sync_from_maya(self):
         if (not self.sync_btn.isChecked() or self._sync_updating or
                 not self.sync_player_to_maya.isChecked() or self.info is None):
@@ -1732,7 +2102,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         if maya_frame is None or maya_frame == self._last_maya_frame:
             return
         self._last_maya_frame = maya_frame
-        target = int(round(maya_frame + self._sync_offset))
+        target = int(round(maya_frame + self._sync_offset - self.sync_offset_spin.value()))
         target = int(utils.clamp(target, 0, self.player.frame_count - 1))
         self._queued_player_frame = target
         # Multiple slider events collapse into one seek every 55ms. Starting
@@ -1763,7 +2133,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 not self.sync_maya_to_player.isChecked() or
                 self._sync_offset is None or cmds is None):
             return
-        maya_frame = float(frame) - self._sync_offset
+        maya_frame = float(frame) - self._sync_offset + self.sync_offset_spin.value()
         self._queued_maya_frame = maya_frame
         if not self._maya_write_timer.isActive():
             # At most 10 Maya evaluation updates/s while video is playing.
@@ -1805,6 +2175,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.out_spin.blockSignals(False)
         self._range_changed()
         self._commit_range_undo()
+        self._schedule_scene_state_save()
 
     def _mark_in(self):
         if self.info is None:
@@ -1887,6 +2258,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._sync_maya_from_player(frame)
         if self.tracking_enabled:
             self._apply_tracked_crop()
+        # Keep the scene's stored playhead current (debounced; fires once the
+        # frame settles, never during continuous playback).
+        self._schedule_scene_state_save()
 
     def _on_playing_changed(self, playing):
         if playing:
@@ -2038,8 +2412,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             return
         self.surface.set_drawing_style(color=color)
         self.draw_color_btn.setStyleSheet(
-            'QToolButton { background:%s; border:1px solid #202020; '
-            'border-radius:3px; }' % color.name())
+            'QToolButton { background:%s; border:1px solid %s; '
+            'border-radius:3px; }' % (color.name(), style.SWATCH_BORDER))
         if self.draw_color_picker.currentColor() != color:
             self.draw_color_picker.blockSignals(True)
             self.draw_color_picker.setCurrentColor(color)
@@ -2343,11 +2717,54 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             -size.height()))
         self.volume_menu.popup(anchor)
 
+    def _current_screen(self):
+        """The QScreen the player currently sits on (not always the primary)."""
+        gui = QtGui.QGuiApplication
+        try:
+            center = self.mapToGlobal(self.rect().center())
+            screen = gui.screenAt(center)
+            if screen is not None:
+                return screen
+        except Exception:
+            pass
+        try:
+            screen = self.window().screen()
+            if screen is not None:
+                return screen
+        except Exception:
+            pass
+        return gui.primaryScreen()
+
     def _toggle_fullscreen(self, enabled):
+        # Fullscreen the player's own top-level window on whichever monitor it is
+        # on, rather than letting Qt default to the primary display.
+        window = self.window() or self
         if enabled:
-            self.showFullScreen()
+            self._pre_fullscreen_geometry = window.geometry()
+            screen = self._current_screen()
+            if screen is not None:
+                # Moving the window onto the target screen first makes Qt choose
+                # that screen for fullscreen.
+                window.setGeometry(screen.geometry())
+            window.showFullScreen()
         else:
-            self.showNormal()
+            window.showNormal()
+            geometry = getattr(self, '_pre_fullscreen_geometry', None)
+            if geometry is not None:
+                window.setGeometry(geometry)
+                self._pre_fullscreen_geometry = None
+
+    def _show_color_tool(self):
+        """Open (or raise) the non-destructive color-correction tool."""
+        if self.color_dialog is None:
+            self.color_dialog = ColorCorrectionDialog(self)
+            self.color_dialog.valuesChanged.connect(self._on_color_changed)
+        self.color_dialog.show()
+        self.color_dialog.raise_()
+        self.color_dialog.activateWindow()
+
+    def _on_color_changed(self, params, enabled):
+        self.surface.set_color_correction(params if enabled else None)
 
     def _toggle_thumbnails(self, visible):
         self.timeline.set_thumbnails_visible(visible)
@@ -2855,7 +3272,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 self._save_preferences()
             except (RuntimeError, TypeError):
                 pass
+            # Persist the current review state (including the player's current
+            # time) into the scene fileInfo and the last-session store before
+            # the player tears down, so closing the window keeps the playhead.
+            scene_state.save_to_scene(self)
             self._closed = True
+            self._scene_persistence.remove()
+            self._scene_state_timer.stop()
             self._maya_sync_timer.stop()
             self._maya_write_timer.stop()
             self._maya_read_timer.stop()
@@ -2864,6 +3287,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.mute_btn._click_timer.stop()
             self.volume_menu.close()
             self.draw_color_menu.close()
+            if self.color_dialog is not None:
+                self.color_dialog.close()
             self.waveform_job.cancel(wait=True)
             self.thumb_job.cancel(wait=True)
 
