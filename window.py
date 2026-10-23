@@ -36,6 +36,7 @@ from .undo import UndoStack
 from . import scene_state
 from .scene_state import ScenePersistence
 from .color import ColorCorrectionDialog
+from .playlist import PlaylistWindow
 
 THUMB_LANE_H = 36
 SPEEDS = (0.25, 0.5, 1.0, 1.5, 2.0)
@@ -403,6 +404,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._scene_state_timer.setInterval(1000)
         self._scene_state_timer.timeout.connect(self._write_scene_state)
         self.color_dialog = None            # lazily created color-correction tool
+        self.playlist_window = None         # lazily created playlist
 
         self._connect()
         self._restore_preferences()
@@ -758,6 +760,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._add_option_box_item(
             file_menu, 'Playblast Current Shot',
             self._playblast_current_shot, self._show_playblast_options)
+        self.act_set_reference = action(
+            file_menu, 'Set Current as Reference', self._set_reference)
+        self.act_toggle_reference = action(
+            file_menu, 'Toggle Reference / Playblast',
+            self._toggle_reference_playblast)
+        self.act_toggle_reference.setEnabled(False)
         notes_menu = file_menu.addMenu('Review Notes')
         action(notes_menu, 'Import Notes…', self._import_notes)
         action(notes_menu, 'Export Notes…', self._export_notes)
@@ -785,6 +793,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                shortcut='Left')
         action(play_menu, 'Next Frame', lambda: self._scrub(self.player.current_frame + 1),
                shortcut='Right')
+        play_menu.addSeparator()
+        action(play_menu, 'Playlist…', self._show_playlist)
         play_menu.addSeparator()
         self.act_loop = action(play_menu, 'Loop', self.player_set_loop, checkable=True,
                                shortcut='L')
@@ -1010,15 +1020,22 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.rect_mode_btn = QtWidgets.QToolButton()
         self.ellipse_mode_btn = QtWidgets.QToolButton()
         self.arrow_mode_btn = QtWidgets.QToolButton()
+        self.text_mode_btn = QtWidgets.QToolButton()
         self.brush_mode_btn.setIcon(self._icon('brush'))
         self.eraser_mode_btn.setIcon(self._icon('eraser'))
         self.rect_mode_btn.setIcon(self._icon('rectangle'))
         self.ellipse_mode_btn.setIcon(self._icon('ellipse'))
         self.arrow_mode_btn.setIcon(self._icon('arrow'))
+        # No bundled glyph for text; a bold "T" reads clearly at this size.
+        self.text_mode_btn.setText('T')
+        text_font = self.text_mode_btn.font()
+        text_font.setBold(True)
+        text_font.setPointSize(text_font.pointSize() + 2)
+        self.text_mode_btn.setFont(text_font)
         mode_buttons = (
             self.select_mode_btn, self.brush_mode_btn, self.eraser_mode_btn, self.rect_mode_btn,
-            self.ellipse_mode_btn, self.arrow_mode_btn)
-        tool_names = ('Select', 'Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow')
+            self.ellipse_mode_btn, self.arrow_mode_btn, self.text_mode_btn)
+        tool_names = ('Select', 'Brush', 'Eraser', 'Rectangle', 'Ellipse', 'Arrow', 'Text')
         for button, tool_name in zip(mode_buttons, tool_names):
             button.setCheckable(True)
             button.setAutoRaise(False)
@@ -1347,7 +1364,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         sg_scroll.setWidgetResizable(True)
         sg_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.shotgrid_panel = ShotGridPanel(
-            load_path=self._load_path, settings=self.settings, parent=self)
+            load_path=self._load_path, settings=self.settings, parent=self,
+            queue_playlist=self._queue_playlist_paths)
         sg_scroll.setWidget(self.shotgrid_panel)
         self.tool_stack.addWidget(sg_scroll)
         self._tool_pages['shotgrid'] = sg_scroll
@@ -1633,7 +1651,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 ('eraser', self.eraser_mode_btn),
                 ('rectangle', self.rect_mode_btn),
                 ('ellipse', self.ellipse_mode_btn),
-                ('arrow', self.arrow_mode_btn)):
+                ('arrow', self.arrow_mode_btn),
+                ('text', self.text_mode_btn)):
             button.toggled.connect(
                 lambda checked, name=mode: checked and self._set_draw_mode(name))
         for swatch in self.draw_swatches:
@@ -1827,9 +1846,53 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 files = sorted(glob.glob(os.path.splitext(str(result))[0] + '*.jpg'))
             if not files:
                 raise RuntimeError('Maya did not create playblast frames.')
+            self._playblast_path = files[0]
             self._load_path(files[0])
+            self._update_reference_actions()
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, 'Playblast failed', str(exc))
+
+    def _set_reference(self):
+        """Mark the currently loaded media as the A/B reference clip."""
+        if self.info is None:
+            self.status_lbl.setText('Load media first to set it as the reference.')
+            return
+        self._reference_path = self.info.path
+        self.status_lbl.setText(
+            'Reference set: ' + os.path.basename(self._reference_path))
+        self._update_reference_actions()
+
+    def _toggle_reference_playblast(self):
+        """Swap the viewer between the reference clip and the latest playblast."""
+        reference, playblast = self._reference_path, self._playblast_path
+        if not (reference and playblast):
+            self.status_lbl.setText(
+                'Set a reference and create a playblast to A/B between them.')
+            return
+        current = self.info.path if self.info is not None else None
+        on_reference = (current and
+                        os.path.normpath(current) == os.path.normpath(reference))
+        target = playblast if on_reference else reference
+        if not os.path.exists(target):
+            self.status_lbl.setText('Toggle target no longer exists:\n' + target)
+            return
+        frame = self.player.current_frame
+        self._load_path(target)
+        # Hold the playhead across the swap so A/B compares the same moment.
+        QtCore.QTimer.singleShot(0, lambda: self.player.seek(
+            min(frame, self.player.frame_count - 1)))
+        self._update_reference_actions()
+
+    def _update_reference_actions(self):
+        both = bool(self._reference_path and self._playblast_path)
+        self.act_toggle_reference.setEnabled(both)
+        on_reference = (self.info is not None and self._reference_path and
+                        os.path.normpath(self.info.path) ==
+                        os.path.normpath(self._reference_path))
+        self.act_toggle_reference.setText(
+            'Toggle Reference / Playblast'
+            + ('  (showing Reference)' if both and on_reference else
+               '  (showing Playblast)' if both else ''))
 
     def _choose_media(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1975,6 +2038,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         # Record the new source into the scene's fileInfo right away.
         self._schedule_scene_state_save()
 
+        if self.playlist_window is not None:
+            self.playlist_window.set_active_path(info.path)
+        self._update_reference_actions()
+
     def _schedule_scene_state_save(self):
         """Queue a debounced write of review state into the scene's fileInfo."""
         if (cmds is None or self._closed or
@@ -2012,7 +2079,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                    self.pressure_size_check, self.pressure_opacity_check,
                    self.brush_mode_btn, self.eraser_mode_btn,
                    self.rect_mode_btn, self.ellipse_mode_btn,
-                   self.arrow_mode_btn,
+                   self.arrow_mode_btn, self.text_mode_btn,
                    self.delete_selected_btn,
                    self.clear_drawing_btn, self.undo_drawing_btn,
                    self.blank_drawing_btn, self.delete_all_notes_btn,
@@ -2038,7 +2105,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         for act in (self.act_export, self.act_thumbs, self.act_wave, self.act_crop,
                     self.act_loop, self.act_flip_h, self.act_flip_v,
                     self.act_toggle_marker, self.act_previous_marker,
-                    self.act_next_marker, self.act_clear_markers):
+                    self.act_next_marker, self.act_clear_markers,
+                    self.act_set_reference):
             act.setEnabled(on)
 
     # ----------------------------------------------------------- playback
@@ -2270,6 +2338,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self._maya_read_timer.stop()
             self._queued_player_frame = None
         self.play_btn.setIcon(self._transport_icon('SP_MediaPause' if playing else 'SP_MediaPlay'))
+        # Auto-advance the playlist when a clip finishes (stopped at its out
+        # point, not looping, not a user pause mid-clip).
+        if (not playing and self.playlist_window is not None and
+                self.playlist_window.auto_advance_enabled() and
+                not self.player.loop and self.info is not None and
+                self.player.current_frame >= self.player.out_frame):
+            QtCore.QTimer.singleShot(0, self.playlist_window.next)
 
     def _range_changed(self, *args):
         self.player.set_range(self.in_spin.value(), self.out_spin.value())
@@ -2445,7 +2520,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             'eraser': ('Eraser Tip', 'Diameter'),
             'rectangle': ('Rectangle Outline', 'Width'),
             'ellipse': ('Ellipse Outline', 'Width'),
-            'arrow': ('Arrow Outline', 'Width')}
+            'arrow': ('Arrow Outline', 'Width'),
+            'text': ('Text', 'Size')}
         heading, label = labels[mode]
         self.draw_tip_title.setText(heading)
         self.draw_width_caption.setText(label)
@@ -2765,6 +2841,31 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
     def _on_color_changed(self, params, enabled):
         self.surface.set_color_correction(params if enabled else None)
+
+    def _show_playlist(self):
+        """Open (or raise) the media playlist."""
+        if self.playlist_window is None:
+            self.playlist_window = PlaylistWindow(self)
+            self.playlist_window.loadRequested.connect(self._load_path)
+            self.playlist_window.add_current_btn.clicked.connect(
+                self._add_current_to_playlist)
+        if self.info is not None:
+            self.playlist_window.set_active_path(self.info.path)
+        self.playlist_window.show()
+        self.playlist_window.raise_()
+        self.playlist_window.activateWindow()
+
+    def _add_current_to_playlist(self):
+        if self.playlist_window is not None and self.info is not None:
+            self.playlist_window.add_paths([self.info.path])
+            self.playlist_window.set_active_path(self.info.path)
+
+    def _queue_playlist_paths(self, paths):
+        """Add paths (e.g. a ShotGrid shot's versions) to the Playlist and show it."""
+        if not paths:
+            return
+        self._show_playlist()
+        self.playlist_window.add_paths(paths)
 
     def _toggle_thumbnails(self, visible):
         self.timeline.set_thumbnails_visible(visible)
@@ -3289,6 +3390,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.draw_color_menu.close()
             if self.color_dialog is not None:
                 self.color_dialog.close()
+            if self.playlist_window is not None:
+                self.playlist_window.close()
             self.waveform_job.cancel(wait=True)
             self.thumb_job.cancel(wait=True)
 

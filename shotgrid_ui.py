@@ -87,9 +87,10 @@ class ShotGridLoginDialog(QtWidgets.QDialog):
 class ShotGridPanel(QtWidgets.QWidget):
     """Side-pane browser. ``load_path(path)`` is called to load a resolved movie."""
 
-    def __init__(self, load_path, settings, parent=None):
+    def __init__(self, load_path, settings, parent=None, queue_playlist=None):
         super(ShotGridPanel, self).__init__(parent)
         self._load_path = load_path
+        self._queue_playlist = queue_playlist  # callback(list_of_paths) -> None
         self._settings = settings  # the shared FrameReviewer Settings wrapper
         self.sg = None
         self._site = ''
@@ -171,6 +172,13 @@ class ShotGridPanel(QtWidgets.QWidget):
         self.load_btn.clicked.connect(self._load_version)
         ver.addWidget(self.load_btn)
 
+        # Context playlist: queue every listed version of this shot into the
+        # main Playlist so a reviewer can step through them in order.
+        self.queue_btn = QtWidgets.QPushButton('Queue Versions → Playlist')
+        self.queue_btn.clicked.connect(self._queue_context_playlist)
+        self.queue_btn.setVisible(self._queue_playlist is not None)
+        ver.addWidget(self.queue_btn)
+
         # Notes ----------------------------------------------------------
         notes = section('Notes')
         self.notes_view = QtWidgets.QTextBrowser()
@@ -188,7 +196,7 @@ class ShotGridPanel(QtWidgets.QWidget):
         self.disconnect_btn.setVisible(connected)
         self.connect_btn.setEnabled(available)
         for widget in (self.project_combo, self.sequence_combo, self.shot_combo,
-                       self.version_list, self.load_btn):
+                       self.version_list, self.load_btn, self.queue_btn):
             widget.setEnabled(connected)
         if not available:
             self.status_lbl.setText(
@@ -385,6 +393,51 @@ class ShotGridPanel(QtWidgets.QWidget):
         self._reset_load_button()
         QtWidgets.QMessageBox.warning(self, 'Could not load Version', message)
 
+    # ----------------------------------------------------- context playlist
+    def _queue_context_playlist(self):
+        """Resolve every listed version's movie and queue them in the Playlist."""
+        if self.sg is None or self._queue_playlist is None:
+            return
+        versions = [self.version_list.item(row).data(ENTITY_ROLE)
+                    for row in range(self.version_list.count())]
+        versions = [v for v in versions if v]
+        if not versions:
+            return
+        self.queue_btn.setEnabled(False)
+        self.queue_btn.setText('Resolving…')
+        token = self._bump('queue')
+
+        def resolve():
+            paths = []
+            for version in versions:
+                try:
+                    path = shotgrid.version_movie_path(self.sg, version)
+                except Exception:
+                    continue
+                if path:
+                    paths.append(path)
+            return paths
+
+        self._run('queue', resolve,
+                  lambda paths, token=token: self._on_context_resolved(paths, token),
+                  self._reset_queue_button)
+
+    def _on_context_resolved(self, paths, token):
+        self._reset_queue_button()
+        if token != self._req.get('queue'):
+            return
+        if paths:
+            self._queue_playlist(paths)
+        else:
+            QtWidgets.QMessageBox.information(
+                self, 'Playlist', 'None of these versions had a playable movie.')
+
+    def _reset_queue_button(self, message=None):
+        self.queue_btn.setText('Queue Versions → Playlist')
+        self.queue_btn.setEnabled(self.sg is not None)
+        if message:
+            QtWidgets.QMessageBox.warning(self, 'Could not queue versions', message)
+
     def _reset_load_button(self):
         self.load_btn.setText('Load into Player')
         self.load_btn.setEnabled(self.sg is not None)
@@ -469,14 +522,19 @@ def _version_summary(version):
 
 
 def _notes_html(rows):
-    blocks = []
+    """Render notes as discrete cards: a titled, bordered block each."""
+    cards = []
     for note in rows:
         user = note.get('user') or {}
         name = html.escape(user['name']) if isinstance(user, dict) and user.get('name') else ''
-        subject = html.escape(note.get('subject') or '')
+        subject = html.escape(note.get('subject') or '') or 'Note'
         content = html.escape(note.get('content') or '').replace('\n', '<br>')
-        header = "<b style='color:%s'>%s</b>" % (style.ACCENT_HI, subject or 'Note')
-        meta = "<span style='color:%s'>%s &middot; %s</span>" % (
+        header = "<b style='color:%s'>%s</b>" % (style.ACCENT_HI, subject)
+        meta = "<span style='color:%s; font-size:9pt'>%s &middot; %s</span>" % (
             style.TEXT_DIM, name, _date_text(note.get('created_at')))
-        blocks.append('%s<br>%s<br>%s' % (header, meta, content))
-    return "<div style='margin-bottom:8px'></div>".join(blocks)
+        cards.append(
+            "<table width='100%%' cellpadding='7' cellspacing='0' "
+            "style='margin-bottom:7px; background:%s; border:1px solid %s;'>"
+            "<tr><td>%s<br>%s<br><span style='color:%s'>%s</span></td></tr></table>"
+            % (style.PANEL, style.BORDER, header, meta, style.TEXT, content))
+    return ''.join(cards)

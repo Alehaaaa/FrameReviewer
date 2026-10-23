@@ -287,7 +287,11 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
                 for stroke in strokes:
                     points = [(*mirror_point(x, y), pressure)
                               for x, y, pressure in stroke.get('points', ())]
-                    mirrored.append(dict(stroke, points=points))
+                    updated = dict(stroke, points=points)
+                    if stroke.get('kind') == 'text' and stroke.get('pos'):
+                        px, py = stroke['pos']
+                        updated['pos'] = list(mirror_point(float(px), float(py)))
+                    mirrored.append(updated)
                 return mirrored
 
             self._drawings = {frame: mirror_strokes(strokes)
@@ -417,6 +421,8 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         erasing = self._tool == 'draw' and self._draw_mode == 'eraser'
         if erasing:
             self.viewport().setCursor(QtCore.Qt.BlankCursor)
+        elif self._tool == 'draw' and self._draw_mode == 'text':
+            self.viewport().setCursor(QtCore.Qt.IBeamCursor)
         elif self._tool in ('crop', 'draw'):
             self.viewport().setCursor(QtCore.Qt.CrossCursor)
         else:
@@ -447,7 +453,8 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
     def set_draw_mode(self, mode):
         mode = str(mode)
         self._draw_mode = mode if mode in (
-            'select', 'brush', 'eraser', 'rectangle', 'ellipse', 'arrow') else 'brush'
+            'select', 'brush', 'eraser', 'rectangle', 'ellipse', 'arrow',
+            'text') else 'brush'
         self._update_selection_box()
         self._apply_draw_cursor()
 
@@ -517,6 +524,20 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             for stroke in strokes:
                 if not isinstance(stroke, dict):
                     raise ValueError('Every annotation stroke must be an object.')
+                if stroke.get('kind') == 'text':
+                    text = str(stroke.get('text', ''))
+                    if not text.strip():
+                        continue
+                    pos = stroke.get('pos') or (0.0, 0.0)
+                    clean_strokes.append(dict(
+                        kind='text', text=text,
+                        pos=[float(pos[0]), float(pos[1])],
+                        color=str(stroke.get('color', style.DRAW_DEFAULT)),
+                        opacity=utils.clamp(float(stroke.get('opacity', 1.0)), 0.01, 1.0),
+                        size=max(2.0, float(stroke.get('size', 24.0))),
+                        points=[], width=max(1.0, float(stroke.get('width', 3.0))),
+                        pressure_size=False, pressure_opacity=False))
+                    continue
                 points = [(float(x), float(y), utils.clamp(float(pressure), 0.0, 1.0))
                           for x, y, pressure in stroke.get('points', [])]
                 if not points:
@@ -926,6 +947,18 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         group = QtWidgets.QGraphicsItemGroup()
         group.setZValue(20)
         self.scene().addItem(group)
+        if stroke.get('kind') == 'text':
+            color = QtGui.QColor(stroke.get('color', style.DRAW_DEFAULT))
+            color.setAlphaF(utils.clamp(float(stroke.get('opacity', 1.0)), 0.02, 1.0))
+            pos = stroke.get('pos') or (0.0, 0.0)
+            item = QtWidgets.QGraphicsSimpleTextItem(str(stroke.get('text', '')))
+            font = item.font()
+            font.setPixelSize(max(2, int(round(float(stroke.get('size', 24.0))))))
+            item.setFont(font)
+            item.setBrush(QtGui.QBrush(color))
+            item.setPos(float(pos[0]), float(pos[1]))
+            group.addToGroup(item)
+            return group
         points = stroke.get('points', [])
         if not points:
             return group
@@ -1086,6 +1119,29 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
             return
         self._active_points.append((x, y, pressure))
         self._refresh_active_stroke()
+
+    def _place_text(self, point):
+        """Prompt for text and drop a text annotation at the scene point."""
+        if self._native.isEmpty():
+            return
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self, 'Text Annotation', 'Annotation text:')
+        if not ok or not text.strip():
+            return
+        # Size the text relative to the frame so it reads at any resolution.
+        size = max(12.0, self._native.height() * 0.04)
+        stroke = dict(kind='text', text=text,
+                      pos=[float(point.x()), float(point.y())],
+                      color=self._pen_color.name(), opacity=self._pen_opacity,
+                      size=size, points=[], width=self._pen_width,
+                      pressure_size=False, pressure_opacity=False)
+        strokes = list(self._drawings.get(self._current_frame, []))
+        strokes.append(stroke)
+        self._drawings[self._current_frame] = strokes
+        self._rebuild_drawing_items()
+        self.annotationFramesChanged.emit(self.annotation_frame_colors())
+        self.drawingChanged.emit(len(self._drawing_items))
+        self.edited.emit(self._current_frame)
 
     def _active_record(self):
         return dict(points=list(self._active_points), color=self._pen_color.name(),
@@ -1289,10 +1345,6 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
     # safe-areas-and-center behaviour; the rest are standard framing guides.
     COMPOSITION_MODES = ('off', 'thirds', 'golden', 'diagonal', 'center', 'safe')
 
-    def set_safe_areas_visible(self, visible):
-        """Back-compat: map the old boolean onto the composition modes."""
-        self.set_composition_mode('safe' if visible else 'off')
-
     def set_composition_mode(self, mode):
         mode = mode if mode in self.COMPOSITION_MODES else 'off'
         if mode == self._composition_mode:
@@ -1458,6 +1510,11 @@ class PlaybackSurface(QtWidgets.QGraphicsView):
         if (event.button() == QtCore.Qt.LeftButton and self._tool == 'draw'
                 and self._draw_mode == 'select' and not self._native.isEmpty()):
             self._selection_press(event)
+            event.accept()
+            return
+        if (event.button() == QtCore.Qt.LeftButton and self._tool == 'draw'
+                and self._draw_mode == 'text' and not self._native.isEmpty()):
+            self._place_text(self.mapToScene(event.pos()))
             event.accept()
             return
         if (event.button() == QtCore.Qt.LeftButton and self._tool == 'draw'
