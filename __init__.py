@@ -24,9 +24,41 @@ __version__ = '3.0.0'
 __all__ = ['show', 'restore', 'shutdown', 'reload', 'FrameReviewerWindow']
 
 
+def _purge_submodules():
+    """Remove cached modules *and* the package attributes pointing at them.
+
+    Deleting only a nested ``sys.modules`` entry is insufficient: Python also
+    stores imported packages as attributes on ``framereviewer``. A later
+    relative import can therefore recover the stale object and
+    mix a newly loaded window with old model classes.
+    """
+    import importlib
+    import sys
+    import types
+
+    package = sys.modules[__name__]
+    prefix = __name__ + '.'
+    modules = [name for name in list(sys.modules) if name.startswith(prefix)]
+
+    # Remove attributes first while their module identities are still known.
+    for attr, value in list(vars(package).items()):
+        if (isinstance(value, types.ModuleType) and
+                getattr(value, '__name__', '').startswith(prefix)):
+            try:
+                delattr(package, attr)
+            except AttributeError:
+                pass
+
+    # Children before parents prevents a partially cached package hierarchy.
+    for name in sorted(modules, key=lambda item: item.count('.'), reverse=True):
+        sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+    return modules
+
+
 def show():
     """Create (or re-create) and raise the FrameReviewer window."""
-    from .window import FrameReviewerWindow
+    from .app.window import FrameReviewerWindow
     return FrameReviewerWindow.show_ui()
 
 
@@ -37,7 +69,7 @@ def restore():
     (and whenever Maya rebuilds the retained control). Must not raise: a throw
     here leaves the docked panel empty.
     """
-    from .window import FrameReviewerWindow
+    from .app.window import FrameReviewerWindow
     return FrameReviewerWindow.restore_ui()
 
 
@@ -48,7 +80,7 @@ def shutdown(delete_workspace=False):
     by hand to force a clean teardown. Returns ``True`` when every background
     worker stopped cleanly.
     """
-    from .window import shutdown_ui
+    from .app.window import shutdown_ui
     return shutdown_ui(delete_workspace=delete_workspace)
 
 
@@ -67,7 +99,6 @@ def reload():
     its module out from under it crashes Maya, so this refuses to purge until
     teardown reports clean and raises instead.
     """
-    import sys
     clean = shutdown(delete_workspace=True)
     if not clean:
         raise RuntimeError(
@@ -75,13 +106,12 @@ def reload():
             'tracking, or playback cache) did not stop in time. Its callbacks '
             'still point at code this reload would purge, which would crash '
             'Maya. Let the job finish, then reload again.')
-    for name in [m for m in list(sys.modules) if m.startswith(__name__ + '.')]:
-        del sys.modules[name]
+    _purge_submodules()
     return show()
 
 
 def __getattr__(name):  # lazy, so importing the package never forces Qt early
     if name == 'FrameReviewerWindow':
-        from .window import FrameReviewerWindow
+        from .app.window import FrameReviewerWindow
         return FrameReviewerWindow
     raise AttributeError(name)

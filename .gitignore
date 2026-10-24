@@ -46,3 +46,5 @@ secrets.json
 build/
 dist/
 *.egg-info/
+
+tests/

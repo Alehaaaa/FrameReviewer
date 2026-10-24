@@ -53,3 +53,19 @@ ONION_NEXT = '#54c9ed'          # cool: later keys
 # -- timeline art ------------------------------------------------------------
 WAVE = '#9a9a9a'                # waveform fill
 THUMB_FRAME = '#1e1e1e'
+
+# -- inspector / workspace chrome -------------------------------------------
+# Isolated from viewer colour management and the annotation palette. Maya can
+# run with different host styles, so sidebar text/fields must be explicit.
+SIDE_BG = BG
+SIDE_HEADER = PANEL
+SIDE_CARD = PANEL
+SIDE_BORDER = BORDER
+SIDE_RAIL = PANEL
+SIDE_HOVER = CONTROL_HOVER
+SIDE_ACTIVE = TOOLMODE_CHECKED
+SIDE_FIELD = FIELD
+SIDE_TEXT = TEXT
+SIDE_MUTED = TEXT_DIM
+SIDE_SUBTLE = TEXT_DIM
+SIDE_ACCENT = ACCENT_HI
