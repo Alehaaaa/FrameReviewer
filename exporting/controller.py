@@ -239,7 +239,9 @@ class ExportJob(QtCore.QThread):
 
     def _final_args(self, src_args, moving=False):
         c = self.ctx
-        args = [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y'] + src_args
+        replace = '-y' if c.get('overwrite', True) else '-n'
+        args = [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror',
+                '-nostdin', replace] + src_args
         if not moving:
             args += ['-frames:v', str(c['count'])]
         filters = self._filters(moving=moving)
@@ -255,6 +257,8 @@ class ExportJob(QtCore.QThread):
         return args
 
     def _execute(self, args):
+        if self.isInterruptionRequested():
+            raise RuntimeError('Export cancelled')
         kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         kwargs.update(_no_window_kwargs())
         kwargs['env'] = media_environment()
@@ -1678,23 +1682,13 @@ class ExportJob(QtCore.QThread):
 
     def run(self):
         try:
+            if self.isInterruptionRequested():
+                raise RuntimeError('Export cancelled')
             managed = None
             if self.ctx.get('stabilization_export') is not None:
                 managed = self._managed_stabilized_export()
             elif self.spec.stage != 'source' or self.ctx.get('managed_movie') or self.ctx.get('composite_export'):
                 managed = self._managed_export()
-            else:
-                # Source stage retains its legacy native FFmpeg route, but
-                # transparent image sequences may never be silently flattened
-                # by the JPEG/H264 encoders used by that route.
-                suffix = os.path.splitext(self.spec.path)[1].lower()
-                if self.seq_files and suffix in ('.mp4', '.jpg', '.jpeg'):
-                    for path in self.seq_files:
-                        if self.isInterruptionRequested():
-                            raise RuntimeError('Export cancelled')
-                        if self._managed_probe_frame(path):
-                            raise ValueError(
-                                'Alpha image sequences cannot be exported to {} without discarding transparency; use an EXR/PNG image sequence.'.format(suffix))
             if managed is None and self.spec.stage == 'source' and (
                     (self.ctx['tracking_enabled'] and self.ctx['centers']) or
                     (self.ctx.get('burnin') and tracking.HAVE_CV2)):
@@ -1706,7 +1700,10 @@ class ExportJob(QtCore.QThread):
             if self.isInterruptionRequested():
                 raise RuntimeError('Export cancelled')
             probe = os.path.join(os.path.dirname(self.ffmpeg), 'ffprobe')
-            verification = verify_output(self.spec, ffprobe=probe if os.path.isfile(probe) else None)
+            verification = verify_output(
+                self.spec, ffprobe=probe if os.path.isfile(probe) else None,
+                ffmpeg=self.ffmpeg, interrupted=self.isInterruptionRequested,
+                set_process=lambda process: setattr(self, '_proc', process))
             if managed is not None:
                 verification['managed_color'] = managed
             if self._movie_audio_source_identity is not None:

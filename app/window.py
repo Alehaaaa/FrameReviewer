@@ -126,9 +126,11 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
         # export state
         self._export_job = None
-        self._export_queue = []
-        self._export_done = []
-        self._export_failed = False
+        self._direct_export_pending = []
+        self._direct_export_done = []
+        self._direct_export_failed = False
+        self._direct_export_active = None
+        self._direct_export_cancelled = False
         self._export_queue_store = None
         self._export_runner = None
         # Export-only intent. These occurrence-specific audio choices are NOT
@@ -1558,12 +1560,17 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.export_btn.setIcon(self._icon('export'))
         self.export_btn.setProperty('role', 'primary')
         self.export_btn.setMinimumHeight(30)
+        self.export_cancel_btn = QtWidgets.QPushButton('Cancel Export')
+        self.export_cancel_btn.setEnabled(False)
+        self.export_cancel_btn.hide()
+        self.export_cancel_btn.clicked.connect(self._cancel_direct_export)
         export_page.addWidget(self.export_btn)
         # Starting an export and verifying the current range are the highest
         # value actions. Resolution/framerate are advanced delivery parameters.
         export_page.insertWidget(0, self.export_btn)
-        export_page.insertWidget(1, range_box.card)
-        jobs = section(export_page, 'Export Queue')
+        export_page.insertWidget(1, self.export_cancel_btn)
+        export_page.insertWidget(2, range_box.card)
+        jobs = section(export_page, 'Managed / Overwrite Queue')
         self.export_queue_list = QtWidgets.QListWidget()
         self.export_queue_list.setObjectName('frameReviewerExportQueue')
         self.export_queue_list.setMinimumHeight(105)
@@ -8361,7 +8368,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._start_export_queue()
 
     def _export(self):
-        if self.info is None or self._export_runner is None:
+        if self.info is None:
             return
         if self._composition is not None:
             return self._export_composition()
@@ -8505,6 +8512,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 'Only the verified image-sequence format for this color '
                 'stage can preserve the requested geometry.')
             return
+        if stage == 'source' and self._source_sequence_has_alpha():
+            QtWidgets.QMessageBox.warning(
+                self, 'Transparency cannot be preserved',
+                'Source MP4 and JPEG outputs do not preserve alpha. Select '
+                'Working EXR or Display PNG for this transparent sequence.')
+            return
         self._commit_review_projection()
         mapping = self.info.frame_mapping()
         doc = self._review_adapter.document if self._review_adapter else None
@@ -8620,72 +8633,264 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             movie_audio_export=movie_audio_export,
             source_frames={'start': mapping.display_to_source(self.player.in_frame),
                            'end': mapping.display_to_source(self.player.out_frame)})
-        overwrite = bool(dialog.overwrite_cb.isChecked())
         try:
-            queued = []
-            source_id = (self.session_controller.current.id
-                         if self.session_controller.current is not None else '')
-            for path in dialog.paths():
-                ctx = dict(snapshot, path=os.path.abspath(path),
-                           source_id=source_id, source_path=self.info.path,
-                           sequence=('.####.' in path),
-                           color_stage=stage)
-                spec = ExportSpec.from_context(ctx, source_path=self.info.path,
-                                               source_id=source_id)
+            intents = self._build_export_intents(snapshot, dialog.paths(), stage)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, 'Export failed', str(exc))
+            return
+        try:
+            if stage == 'source' and not dialog.overwrite_cb.isChecked():
+                self._start_direct_exports(intents)
+            else:
+                self._start_staged_exports(
+                    intents, overwrite=dialog.overwrite_cb.isChecked())
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, 'Export failed', str(exc))
+
+    def _build_export_intents(self, snapshot, paths, stage):
+        source = self.session_controller.current
+        source_id = source.id if source is not None else ''
+        intents = []
+        for path in paths:
+            context = dict(
+                snapshot, path=os.path.abspath(path), source_id=source_id,
+                source_path=self.info.path, sequence=('.####.' in path),
+                color_stage=stage)
+            spec = ExportSpec.from_context(
+                context, source_path=self.info.path, source_id=source_id)
+            intents.append((context, spec))
+        if not intents:
+            raise ValueError('Select at least one export output.')
+        return intents
+
+    def _source_sequence_has_alpha(self):
+        if not self.info.is_sequence:
+            return False
+        if self.info.alpha_mode in ('straight', 'premultiplied'):
+            return True
+        if self.info.alpha_mode == 'opaque':
+            return False
+        pixel_format = str(self.info.pixel_format or '').casefold()
+        if pixel_format.startswith(
+                ('rgba', 'bgra', 'argb', 'abgr', 'gbrap', 'yuva', 'ya')):
+            return True
+        paths = self.info.sequence_files
+        if not paths:
+            return False
+        image = QtGui.QImageReader(paths[0]).read()
+        return not image.isNull() and image.hasAlphaChannel()
+
+    @property
+    def _export_queue(self):
+        """Compatibility view of direct pending work for older integrations."""
+        return self._direct_export_pending
+
+    @_export_queue.setter
+    def _export_queue(self, value):
+        self._direct_export_pending = list(value)
+
+    def _start_direct_exports(self, intents):
+        for _context, spec in intents:
+            target = os.path.dirname(spec.path) if spec.sequence else spec.path
+            if os.path.lexists(target):
+                raise FileExistsError('Export output already exists: {}'.format(target))
+            if not spec.sequence and os.path.lexists(spec.path + '.frmanifest.json'):
+                raise FileExistsError(
+                    'Export manifest already exists: {}'.format(
+                        spec.path + '.frmanifest.json'))
+        self._direct_export_pending = list(intents)
+        self._direct_export_done = []
+        self._direct_export_failed = False
+        self._direct_export_active = None
+        self._direct_export_cancelled = False
+        self.player.pause()
+        self.export_cancel_btn.show()
+        self.export_cancel_btn.setEnabled(True)
+        self._start_next_direct_export()
+
+    def _start_staged_exports(self, intents, overwrite=False):
+        if self._export_runner is None:
+            raise RuntimeError('Managed export staging is unavailable.')
+        queued = []
+        try:
+            for _context, spec in intents:
                 queued.append(self._export_runner.enqueue(
                     spec, seq_files=self.info.sequence_files,
                     width=self.info.width, height=self.info.height,
                     overwrite=overwrite))
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, 'Queue export failed', str(exc))
-            return
+        except Exception:
+            for task in queued:
+                self._export_runner.cancel(task.id)
+            raise
         self.player.pause()
         self.status_lbl.setText('Queued {} export(s).'.format(len(queued)))
         self._start_export_queue()
 
-    def _export_next(self):
-        if not self._export_queue:
+    def _start_next_direct_export(self):
+        if not self._direct_export_pending:
             self._export_job = None
+            self._direct_export_active = None
             self._task_end('export')
             self._set_enabled(True)
-            if not self._export_failed:
-                folders = list(dict.fromkeys(os.path.dirname(p) for p in self._export_done))
+            self.export_cancel_btn.setEnabled(False)
+            self.export_cancel_btn.hide()
+            if not self._direct_export_failed:
+                folders = list(dict.fromkeys(
+                    os.path.dirname(path) for path in self._direct_export_done))
                 links = ['<a href="{}" style="color:{}">{}</a>'.format(
                     QtCore.QUrl.fromLocalFile(os.path.abspath(p)).toString(),
                     style.ACCENT_HI, html.escape(os.path.basename(p) or p)) for p in folders]
                 self.status_lbl.setText('Export complete. Open: ' + ' | '.join(links))
             return
-        context = self._export_queue.pop(0)
+        public_context, public_spec = self._direct_export_pending.pop(0)
+        try:
+            target = (os.path.dirname(public_spec.path) if public_spec.sequence
+                      else public_spec.path)
+            if os.path.lexists(target):
+                raise FileExistsError(
+                    'Export output appeared before encoding: {}'.format(target))
+            parent = (os.path.dirname(target) if public_spec.sequence
+                      else os.path.dirname(public_spec.path))
+            os.makedirs(parent, exist_ok=True)
+            stage = tempfile.mkdtemp(prefix='.frdirect-', dir=parent)
+            staged_context = dict(public_context)
+            staged_context['path'] = os.path.join(
+                stage, os.path.basename(public_spec.path))
+            staged_context['overwrite'] = False
+            self._direct_export_active = {
+                'public_context': public_context, 'public_spec': public_spec,
+                'stage': stage, 'staged_path': staged_context['path'],
+                'result': False, 'error': None}
+        except Exception as exc:
+            self._on_direct_export_error(str(exc))
+            return
         self._set_enabled(False)
-        # Label the bar with the file's position in a multi-output queue.
-        index = len(self._export_done) + 1
-        total = index + len(self._export_queue)
+        index = len(self._direct_export_done) + 1
+        total = index + len(self._direct_export_pending)
         label = 'Exporting' if total == 1 else 'Exporting {}/{}'.format(index, total)
         self._task_begin('export', label)
-        self.status_lbl.setText('Exporting {}…'.format(os.path.basename(context['path'])))
-        job = ExportJob(self.ffmpeg, self.info.path, self.info.sequence_files,
-                        self.info.width, self.info.height, context,
-                        QtCore.QCoreApplication.instance())
-        job.progress.connect(lambda v: self._task_update('export', v))
-        job.result.connect(lambda p=context['path']: self._on_export_done(p))
-        job.error.connect(self._on_export_error)
-        job.finished.connect(job.deleteLater)
-        self._export_job = job
-        job.start()
+        self.status_lbl.setText(
+            'Exporting {}…'.format(os.path.basename(public_spec.path)))
+        try:
+            job = ExportJob(self.ffmpeg, self.info.path, self.info.sequence_files,
+                            self.info.width, self.info.height, staged_context,
+                            QtCore.QCoreApplication.instance())
+            job.progress.connect(lambda v: self._task_update('export', v))
+            job.result.connect(self._on_direct_export_result)
+            job.error.connect(self._on_direct_export_job_error)
+            job.finished.connect(self._on_direct_export_finished)
+            job.finished.connect(job.deleteLater)
+            self._export_job = job
+            job.start()
+        except Exception as exc:
+            self._on_direct_export_error(str(exc))
 
-    def _on_export_done(self, path):
-        self._export_done.append(path)
+    def _on_direct_export_result(self):
+        if self._direct_export_active is not None:
+            self._direct_export_active['result'] = True
+
+    def _on_direct_export_job_error(self, message):
+        if self._direct_export_active is not None:
+            self._direct_export_active['error'] = str(message)
+
+    def _cleanup_direct_stage(self, active):
+        stage = active.get('stage') if active else None
+        if stage and os.path.isdir(stage):
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def _promote_direct_export(self, active):
+        public_spec = active['public_spec']
+        staged_path = active['staged_path']
+        staged_manifest = staged_path + '.frmanifest.json'
+        with open(staged_manifest, encoding='utf-8') as stream:
+            verification = json.load(stream)['verification']
+        if (not isinstance(verification, dict) or
+                verification.get('status') != 'verified'):
+            raise RuntimeError('Private export stage has no valid verification receipt.')
+        os.unlink(staged_manifest)
+        with open(staged_manifest, 'x', encoding='utf-8') as stream:
+            json.dump(public_spec.manifest(verification), stream, indent=2,
+                      sort_keys=True, ensure_ascii=False)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        target = (os.path.dirname(public_spec.path) if public_spec.sequence
+                  else public_spec.path)
+        if os.path.lexists(target):
+            raise FileExistsError(
+                'Export output appeared before publication: {}'.format(target))
+        if public_spec.sequence:
+            os.rename(active['stage'], target)
+        else:
+            public_manifest = public_spec.path + '.frmanifest.json'
+            if os.path.lexists(public_manifest):
+                raise FileExistsError(
+                    'Export manifest appeared before publication: {}'.format(
+                        public_manifest))
+            os.link(staged_path, public_spec.path)
+            try:
+                os.link(staged_manifest, public_manifest)
+            except Exception:
+                if os.path.isfile(public_spec.path):
+                    os.unlink(public_spec.path)
+                raise
+            os.unlink(staged_path)
+            self._cleanup_direct_stage(active)
+
+    def _on_direct_export_finished(self):
+        active = self._direct_export_active
         self._export_job = None
-        self._export_next()
+        self._direct_export_active = None
+        if active is None:
+            return
+        if self._closed:
+            self._cleanup_direct_stage(active)
+            return
+        error = active.get('error')
+        if not error and not active.get('result'):
+            error = 'Export worker exited without a result.'
+        if not error:
+            try:
+                self._promote_direct_export(active)
+            except Exception as exc:
+                error = str(exc)
+        if error:
+            self._cleanup_direct_stage(active)
+            self._on_direct_export_error(error)
+            return
+        self._direct_export_done.append(active['public_spec'].path)
+        self._start_next_direct_export()
 
-    def _on_export_error(self, message):
-        self._export_failed = True
-        self._export_queue = []
+    def _on_direct_export_error(self, message):
+        self._direct_export_failed = True
+        self._direct_export_pending = []
+        self._cleanup_direct_stage(self._direct_export_active)
+        self._direct_export_active = None
         self._export_job = None
         self._task_end('export')
         self._set_enabled(True)
-        self.status_lbl.setText('Export failed: ' + html.escape(message))
-        QtWidgets.QMessageBox.critical(self, 'Export failed', message)
+        self.export_cancel_btn.setEnabled(False)
+        self.export_cancel_btn.hide()
+        if self._direct_export_cancelled or str(message).lower() == 'export cancelled':
+            self.status_lbl.setText('Export cancelled.')
+            return
+        completed = len(self._direct_export_done)
+        suffix = (' {} output(s) completed before the failure.'.format(completed)
+                  if completed else '')
+        self.status_lbl.setText(
+            'Export failed: ' + html.escape(str(message)) + suffix)
+        QtWidgets.QMessageBox.critical(
+            self, 'Export failed', str(message) + suffix)
+
+    def _cancel_direct_export(self):
+        job = self._export_job
+        if job is None or self._direct_export_active is None:
+            return
+        self._direct_export_cancelled = True
+        self._direct_export_pending = []
+        self.export_cancel_btn.setEnabled(False)
+        job.requestInterruption()
+        job.stop_now()
 
     # ---------------------------------------------------------- lifecycle
     def _about(self):
@@ -8748,6 +8953,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                     if not stopped:
                         self._shutdown_pending_jobs.append(job)
                     clean = clean and stopped
+                if not self._shutdown_pending_jobs and self._direct_export_active:
+                    self._cleanup_direct_stage(self._direct_export_active)
+                    self._direct_export_active = None
                 clean = bool(self.player.shutdown()) and clean
                 self._shutdown_clean = clean
                 if clean and type(self)._instance is self:
@@ -8809,20 +9017,25 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             export_job = self._export_job
             self._export_job = None
             runner = self._export_runner
+            direct_job = bool(export_job is not None and (
+                runner is None or runner.active_job is not export_job))
+            if direct_job:
+                self._direct_export_pending = []
+                self._direct_export_cancelled = True
+                for signal in (export_job.progress, export_job.result,
+                               export_job.error, export_job.finished):
+                    try:
+                        signal.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
             if runner is not None:
                 # Keep the runner's finished/verification callbacks connected
                 # while cancellation drains. An interrupted export remains
                 # journalled; it must never be reported as successful simply
                 # because Maya closed its window.
                 runner.shutdown(cancel_active=True)
-            elif export_job is not None:
-                for signal in (export_job.progress, export_job.result,
-                               export_job.error):
-                    try:
-                        signal.disconnect()
-                    except (RuntimeError, TypeError):
-                        pass
-            if not self._stop_thread(export_job, 3500):
+            export_stopped = self._stop_thread(export_job, 3500)
+            if not export_stopped:
                 self._shutdown_pending_jobs.append(export_job)
                 clean = False
             elif runner is not None and runner.active_id is not None:
@@ -8830,6 +9043,11 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 # Finalize the durable cancellation exactly once; the late
                 # signal sees no active task and becomes a no-op.
                 runner._finished(runner.active_id)
+            if direct_job and export_stopped:
+                self._cleanup_direct_stage(self._direct_export_active)
+                self._direct_export_active = None
+                if export_job is not None:
+                    export_job.deleteLater()
             if getattr(self, 'shotgrid_panel', None) is not None:
                 clean = bool(self.shotgrid_panel.shutdown()) and clean
             clean = bool(self.player.shutdown()) and clean

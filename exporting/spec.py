@@ -1247,11 +1247,86 @@ def _files_for_sequence(pattern):
     return [path for path in matches if os.path.isfile(path)]
 
 
-def verify_output(spec, ffprobe=None):
-    """Check output before success; use ffprobe for stream/time metadata.
+def _expected_movie_frames(spec, context):
+    if spec.stage != 'source' or context.get('managed_movie'):
+        return spec.count
+    speed = abs(float(context.get('speed', 1.0)))
+    if speed <= 0:
+        raise RuntimeError('Output specification has invalid playback speed.')
+    expected = max(1, int(round(
+        spec.count * float(Fraction(spec.fps)) /
+        float(Fraction(spec.source_fps)) / speed)))
+    if not (context.get('tracking_enabled') or context.get('burnin')):
+        expected = min(expected, spec.count)
+    return expected
 
-    Missing ffprobe permits basic output checks and records the reduced
-    verification level; an installed but failing ffprobe is a hard failure.
+
+def _verify_movie_with_ffmpeg(spec, ffmpeg, context, interrupted=None,
+                              set_process=None):
+    """Decode the completed movie and count frames without using ffprobe."""
+    command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror',
+               '-nostdin', '-i', spec.path, '-map', '0:v:0', '-an', '-sn',
+               '-dn', '-f', 'null', '-', '-progress', 'pipe:1', '-nostats']
+    proc = None
+    try:
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        if set_process is not None:
+            set_process(proc)
+        for _attempt in range(480):
+            if interrupted is not None and interrupted():
+                proc.kill()
+                proc.communicate()
+                raise RuntimeError('Export cancelled')
+            try:
+                stdout, stderr = proc.communicate(timeout=.25)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        else:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError('FFmpeg export validation timed out.')
+    except OSError as exc:
+        raise RuntimeError('FFmpeg could not validate export: {}'.format(exc))
+    finally:
+        if set_process is not None:
+            set_process(None)
+    if interrupted is not None and interrupted():
+        raise RuntimeError('Export cancelled')
+    if proc.returncode:
+        raise RuntimeError('FFmpeg could not decode completed export: {}'.format(
+            stderr.decode('utf-8', 'replace')[-500:]))
+    progress = {}
+    for line in stdout.decode('utf-8', 'replace').splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            progress[key] = value
+    try:
+        frames = int(progress['frame'])
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError('FFmpeg did not report a completed frame count.')
+    expected = _expected_movie_frames(spec, context)
+    tolerance = max(1, int(round(expected * 0.02)))
+    if abs(frames - expected) > tolerance:
+        raise RuntimeError('Output has {} frames, expected about {}.'.format(
+            frames, expected))
+    return {'status': 'verified', 'verification': 'ffmpeg-decode',
+            'frames_decoded': frames, 'expected_frames': expected,
+            'width': spec.output_size[0], 'height': spec.output_size[1],
+            'fps': str(Fraction(spec.fps))}
+
+
+def verify_output(spec, ffprobe=None, ffmpeg=None, interrupted=None,
+                  set_process=None):
+    """Check that an export produced the requested files.
+
+    Ordinary Source exports deliberately stop after bounded filesystem checks.
+    FFmpeg already reports encode failures to the export job, so running a
+    second tool over every finished movie only makes the simple export path
+    depend on a matching, fully functional ffprobe installation.  Precision
+    managed outputs still use ffprobe where stream metadata is part of their
+    explicit color/audio contract.
     """
     if spec.sequence:
         files = _files_for_sequence(spec.path)
@@ -1291,10 +1366,25 @@ def verify_output(spec, ffprobe=None):
             raise RuntimeError('Export output is absent or empty: {}'.format(target))
         result = {'status': 'basic', 'kind': 'movie',
                   'file_size': os.path.getsize(target)}
+    context = spec.to_context()
+    needs_stream_proof = bool(
+        spec.stage != 'source' or
+        context.get('managed_movie') or
+        context.get('composite_export') or
+        context.get('managed_geometry_export') or
+        context.get('stabilization_export'))
+    if not needs_stream_proof:
+        decoder = ffmpeg or (shutil.which('ffmpeg') if not spec.sequence else None)
+        if not spec.sequence and decoder:
+            result.update(_verify_movie_with_ffmpeg(
+                spec, decoder, context, interrupted=interrupted,
+                set_process=set_process))
+        else:
+            result['verification'] = 'ffmpeg-output'
+        return result
     if ffprobe is None:
         ffprobe = shutil.which('ffprobe')
     if not ffprobe:
-        context = spec.to_context()
         if context.get('managed_movie') and context.get('movie_audio_policy') == 'preserve':
             raise RuntimeError('Managed embedded audio cannot be verified without ffprobe.')
         return result
@@ -1315,19 +1405,7 @@ def verify_output(spec, ffprobe=None):
     counted = stream.get('nb_read_frames')
     if not spec.sequence and counted not in (None, 'N/A'):
         actual_count = int(counted)
-        context = spec.to_context()
-        if spec.stage != 'source' or context.get('managed_movie'):
-            # The managed frame plan enumerates one output per display-index
-            # entry, even when output FPS differs from media/source FPS.
-            expected = spec.count
-        else:
-            speed = abs(float(context.get('speed', 1.0)))
-            if speed <= 0:
-                raise RuntimeError('Output specification has invalid playback speed.')
-            expected = max(1, int(round(spec.count * float(Fraction(spec.fps)) /
-                                         float(Fraction(spec.source_fps)) / speed)))
-            if not (context.get('tracking_enabled') or context.get('burnin')):
-                expected = min(expected, spec.count)  # FFmpeg -frames:v cap
+        expected = _expected_movie_frames(spec, context)
         if abs(actual_count - expected) > max(1, int(round(expected * 0.02))):
             raise RuntimeError('Output has {} frames, expected about {}.'.format(
                 actual_count, expected))
@@ -1344,7 +1422,6 @@ def verify_output(spec, ffprobe=None):
                    'fps': stream_rate,
                    'duration': data.get('format', {}).get('duration'),
                    'frames_probed': counted})
-    context = spec.to_context()
     if context.get('managed_movie') and context.get('movie_audio_policy') == 'preserve':
         validate_managed_movie_audio(spec)
         try:
