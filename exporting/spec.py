@@ -287,32 +287,7 @@ def validate_managed_export(spec, seq_files, input_size):
         raise ValueError('Managed MP4 yuv420p output needs even dimensions.')
     if movie:
         return
-    plan = managed_input_plan(spec, seq_files)
-    if ext in ('.mp4', '.jpg', '.jpeg'):
-        # Keep the main-thread queue preflight bounded for very long
-        # sequences. The worker probes *every* real input before encoding, so
-        # later/mixed RGBA frames still fail explicitly before any media write.
-        ffprobe = shutil.which('ffprobe')
-        if ffprobe:
-            real_paths = list(dict.fromkeys(
-                item['path'] for item in plan if item['path']))
-            sampled = (real_paths[0:1] +
-                       real_paths[len(real_paths) // 2:len(real_paths) // 2 + 1] +
-                       real_paths[-1:])
-            for path in dict.fromkeys(sampled):
-                if not os.path.isfile(path):
-                    continue
-                try:
-                    details = json.loads(subprocess.check_output([
-                        ffprobe, '-v', 'error', '-select_streams', 'v:0',
-                        '-show_entries', 'stream=pix_fmt', '-of', 'json',
-                        path], stderr=subprocess.STDOUT, timeout=30))
-                    fmt = details['streams'][0]['pix_fmt'].casefold()
-                except (IndexError, KeyError, ValueError, OSError,
-                        subprocess.SubprocessError):
-                    continue  # Corrupt inputs must fail as decode errors later.
-                if _has_alpha_format(fmt):
-                    raise ValueError('Alpha image sequences cannot be exported to {}: the codec discards transparency; use EXR or PNG.'.format(ext))
+    managed_input_plan(spec, seq_files)
 
 
 def _has_alpha_format(fmt):

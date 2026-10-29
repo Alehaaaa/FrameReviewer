@@ -15,7 +15,6 @@ import hashlib
 import html
 import json
 import os
-import shutil
 import tempfile
 import glob
 import sys
@@ -41,6 +40,7 @@ from ..playback.thumbnails import ThumbnailStripJob
 from ..viewer.tracking import TrackingJob
 from ..exporting import ExportOptionsDialog, ExportJob
 from ..exporting.spec import ExportSpec
+from ..exporting.direct_delivery import DirectStage, validate_new_outputs
 from ..exporting.queue_store import ExportQueueStore
 from ..exporting.queue_runner import (ExportQueueRunner, QueueBusyError,
                                       existing_export_job_factory)
@@ -8512,12 +8512,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 'Only the verified image-sequence format for this color '
                 'stage can preserve the requested geometry.')
             return
-        if stage == 'source' and self._source_sequence_has_alpha():
-            QtWidgets.QMessageBox.warning(
-                self, 'Transparency cannot be preserved',
-                'Source MP4 and JPEG outputs do not preserve alpha. Select '
-                'Working EXR or Display PNG for this transparent sequence.')
-            return
         self._commit_review_projection()
         mapping = self.info.frame_mapping()
         doc = self._review_adapter.document if self._review_adapter else None
@@ -8663,23 +8657,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             raise ValueError('Select at least one export output.')
         return intents
 
-    def _source_sequence_has_alpha(self):
-        if not self.info.is_sequence:
-            return False
-        if self.info.alpha_mode in ('straight', 'premultiplied'):
-            return True
-        if self.info.alpha_mode == 'opaque':
-            return False
-        pixel_format = str(self.info.pixel_format or '').casefold()
-        if pixel_format.startswith(
-                ('rgba', 'bgra', 'argb', 'abgr', 'gbrap', 'yuva', 'ya')):
-            return True
-        paths = self.info.sequence_files
-        if not paths:
-            return False
-        image = QtGui.QImageReader(paths[0]).read()
-        return not image.isNull() and image.hasAlphaChannel()
-
     @property
     def _export_queue(self):
         """Compatibility view of direct pending work for older integrations."""
@@ -8690,14 +8667,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._direct_export_pending = list(value)
 
     def _start_direct_exports(self, intents):
-        for _context, spec in intents:
-            target = os.path.dirname(spec.path) if spec.sequence else spec.path
-            if os.path.lexists(target):
-                raise FileExistsError('Export output already exists: {}'.format(target))
-            if not spec.sequence and os.path.lexists(spec.path + '.frmanifest.json'):
-                raise FileExistsError(
-                    'Export manifest already exists: {}'.format(
-                        spec.path + '.frmanifest.json'))
+        validate_new_outputs(intents)
         self._direct_export_pending = list(intents)
         self._direct_export_done = []
         self._direct_export_failed = False
@@ -8744,23 +8714,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             return
         public_context, public_spec = self._direct_export_pending.pop(0)
         try:
-            target = (os.path.dirname(public_spec.path) if public_spec.sequence
-                      else public_spec.path)
-            if os.path.lexists(target):
-                raise FileExistsError(
-                    'Export output appeared before encoding: {}'.format(target))
-            parent = (os.path.dirname(target) if public_spec.sequence
-                      else os.path.dirname(public_spec.path))
-            os.makedirs(parent, exist_ok=True)
-            stage = tempfile.mkdtemp(prefix='.frdirect-', dir=parent)
-            staged_context = dict(public_context)
-            staged_context['path'] = os.path.join(
-                stage, os.path.basename(public_spec.path))
-            staged_context['overwrite'] = False
-            self._direct_export_active = {
-                'public_context': public_context, 'public_spec': public_spec,
-                'stage': stage, 'staged_path': staged_context['path'],
-                'result': False, 'error': None}
+            active, staged_context = DirectStage.create(
+                public_context, public_spec)
+            self._direct_export_active = active
         except Exception as exc:
             self._on_direct_export_error(str(exc))
             return
@@ -8787,55 +8743,15 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
     def _on_direct_export_result(self):
         if self._direct_export_active is not None:
-            self._direct_export_active['result'] = True
+            self._direct_export_active.result = True
 
     def _on_direct_export_job_error(self, message):
         if self._direct_export_active is not None:
-            self._direct_export_active['error'] = str(message)
+            self._direct_export_active.error = str(message)
 
     def _cleanup_direct_stage(self, active):
-        stage = active.get('stage') if active else None
-        if stage and os.path.isdir(stage):
-            shutil.rmtree(stage, ignore_errors=True)
-
-    def _promote_direct_export(self, active):
-        public_spec = active['public_spec']
-        staged_path = active['staged_path']
-        staged_manifest = staged_path + '.frmanifest.json'
-        with open(staged_manifest, encoding='utf-8') as stream:
-            verification = json.load(stream)['verification']
-        if (not isinstance(verification, dict) or
-                verification.get('status') != 'verified'):
-            raise RuntimeError('Private export stage has no valid verification receipt.')
-        os.unlink(staged_manifest)
-        with open(staged_manifest, 'x', encoding='utf-8') as stream:
-            json.dump(public_spec.manifest(verification), stream, indent=2,
-                      sort_keys=True, ensure_ascii=False)
-            stream.write('\n')
-            stream.flush()
-            os.fsync(stream.fileno())
-        target = (os.path.dirname(public_spec.path) if public_spec.sequence
-                  else public_spec.path)
-        if os.path.lexists(target):
-            raise FileExistsError(
-                'Export output appeared before publication: {}'.format(target))
-        if public_spec.sequence:
-            os.rename(active['stage'], target)
-        else:
-            public_manifest = public_spec.path + '.frmanifest.json'
-            if os.path.lexists(public_manifest):
-                raise FileExistsError(
-                    'Export manifest appeared before publication: {}'.format(
-                        public_manifest))
-            os.link(staged_path, public_spec.path)
-            try:
-                os.link(staged_manifest, public_manifest)
-            except Exception:
-                if os.path.isfile(public_spec.path):
-                    os.unlink(public_spec.path)
-                raise
-            os.unlink(staged_path)
-            self._cleanup_direct_stage(active)
+        if active is not None:
+            active.cleanup()
 
     def _on_direct_export_finished(self):
         active = self._direct_export_active
@@ -8846,19 +8762,19 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         if self._closed:
             self._cleanup_direct_stage(active)
             return
-        error = active.get('error')
-        if not error and not active.get('result'):
+        error = active.error
+        if not error and not active.result:
             error = 'Export worker exited without a result.'
         if not error:
             try:
-                self._promote_direct_export(active)
+                active.promote()
             except Exception as exc:
                 error = str(exc)
         if error:
             self._cleanup_direct_stage(active)
             self._on_direct_export_error(error)
             return
-        self._direct_export_done.append(active['public_spec'].path)
+        self._direct_export_done.append(active.public_spec.path)
         self._start_next_direct_export()
 
     def _on_direct_export_error(self, message):

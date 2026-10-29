@@ -1253,11 +1253,9 @@ class ExportJob(QtCore.QThread):
             has_alpha = any(self._managed_probe_frame(path) for path in sources)
         channels = 4 if has_alpha else 3
         suffix = os.path.splitext(self.spec.path)[1].lower()
-        if has_alpha and suffix in ('.jpg', '.jpeg', '.mp4') and not composite:
-            raise ValueError('Transparent source media cannot be encoded as {} without losing alpha; use EXR or PNG.'.format(suffix))
-        if composite and suffix == '.mp4':
-            if any(m['alpha_mode'] != 'opaque' for m in members):
-                raise ValueError('Composite MP4 does not preserve member transparency; use EXR or PNG.')
+        # Lossy delivery formats are always opaque. Alpha affects channel
+        # selection, never whether the requested output is allowed.
+        if suffix in ('.jpg', '.jpeg', '.mp4'):
             has_alpha = False
         float_output = suffix == '.exr'
         if float_output:
@@ -1327,11 +1325,6 @@ class ExportJob(QtCore.QThread):
                             frame, members, self.ctx['composite_export']['parameters'],
                             self.ctx['composite_export']['mode'], state, source_alpha,
                             np)
-                    if suffix == '.mp4' and not np.all(
-                            pixels[:, :, 3] >= 1 - 1e-6):
-                        raise ValueError('Composite MP4 cannot flatten transparent pixels.')
-                    if not has_alpha:
-                        pixels = pixels[:, :, :3]
                 elif movie:
                     raw_pixels = self._managed_movie_next(np, channels)
                     processed = process_pixels(raw_pixels, state=state,
@@ -1366,6 +1359,14 @@ class ExportJob(QtCore.QThread):
                                                    source_stage='source',
                                                    alpha_mode=state.alpha_mode)
                         pixels = self._managed_geometry(processed)
+                if not has_alpha and pixels.shape[2] == 4:
+                    # MP4/JPEG are opaque by definition. Composite straight
+                    # alpha onto black; premultiplied sources already carry
+                    # the same black-matted RGB contribution.
+                    rgb = pixels[:, :, :3]
+                    if composite or state.alpha_mode == 'straight':
+                        rgb = rgb * pixels[:, :, 3:4]
+                    pixels = rgb
                 if (has_alpha and not composite and suffix == '.png' and
                         state.alpha_mode == 'premultiplied' and
                         (movie or frame.get('path') is not None)):
