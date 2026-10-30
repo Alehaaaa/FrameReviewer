@@ -249,7 +249,9 @@ class ExportJob(QtCore.QThread):
             args += ['-vf', ','.join(filters)]
         fps = c['fps']
         if c['sequence']:
-            args += ['-vsync', '0', '-r', '{:.8f}'.format(fps), '-start_number', '1001',
+            # One file per frame; an output -r would contradict passthrough
+            # timing (FFmpeg 7+ rejects the pair) and means nothing to stills.
+            args += ['-vsync', '0', '-start_number', '1001',
                      '-q:v', '2', self._output_path()]
         else:
             args += ['-r', '{:.8f}'.format(fps), '-c:v', 'libx264', '-crf', '18',

@@ -400,17 +400,8 @@ def is_neutral(params):
 
 
 def _qimage_to_array(image):
-    """RGB888 QImage -> contiguous HxWx3 uint8 array (handles row padding)."""
-    image = image.convertToFormat(QtGui.QImage.Format_RGB888)
-    width, height, stride = image.width(), image.height(), image.bytesPerLine()
-    ptr = image.constBits()
-    try:
-        ptr.setsize(height * stride)        # PySide2 returns a sip.voidptr
-    except AttributeError:
-        pass                                # PySide6 returns a memoryview
-    flat = np.frombuffer(ptr, np.uint8, count=height * stride)
-    rows = flat.reshape(height, stride)
-    return rows[:, :width * 3].reshape(height, width, 3)
+    from .qimage import qimage_to_rgb
+    return qimage_to_rgb(image)
 
 
 def grade_pixmap(pixmap, params):

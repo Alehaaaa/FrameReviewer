@@ -42,7 +42,7 @@ def _timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _owner_alive(lock_path):
+def owner_alive(lock_path):
     """Conservative process-liveness check for an existing queue lease."""
     if not os.path.lexists(lock_path):
         return False
@@ -132,7 +132,7 @@ def _output_key(spec):
     return os.path.normcase(os.path.abspath(spec.path))
 
 
-def _unsafe_output_parent(path):
+def unsafe_output_parent(path):
     """Block redirecting symlinks but tolerate macOS /var and /tmp aliases."""
     parent = os.path.dirname(path)
     while parent and parent != os.path.dirname(parent):
@@ -153,7 +153,7 @@ def _validate_spec(spec):
         raise ValueError('Queue output path may not contain traversal or noncanonical components.')
     # A symlink in an output parent can redirect atomic promotion or backup
     # operations outside the selected directory after a restart.
-    if _unsafe_output_parent(spec.path):
+    if unsafe_output_parent(spec.path):
         raise ValueError('Queue output parent must not be a symlink.')
     if spec.sequence:
         if not re.search(r'\#{4}', os.path.basename(spec.path)):
@@ -224,7 +224,7 @@ class ExportQueueStore(object):
             self._validate_data(data)
             self._data = data
             interrupted = False
-            if not _owner_alive(self.path + '.runlock'):
+            if not owner_alive(self.path + '.runlock'):
                 for task in self._data['tasks']:
                     if task['state'] in (RUNNING, COMMITTING, CANCELLING):
                         task['state'] = CRASHED
@@ -264,7 +264,7 @@ class ExportQueueStore(object):
 
     def _save(self):
         lease = self.path + '.runlock'
-        if _owner_alive(lease):
+        if owner_alive(lease):
             try:
                 with open(lease, encoding='utf-8') as stream:
                     nonce = json.load(stream).get('nonce')
@@ -492,4 +492,5 @@ class ExportQueueStore(object):
 
 
 __all__ = ['ExportQueueStore', 'QueueTask', 'PENDING', 'RUNNING', 'COMMITTING',
-           'SUCCEEDED', 'FAILED', 'CRASHED', 'CANCELLING', 'CANCELLED']
+           'SUCCEEDED', 'FAILED', 'CRASHED', 'CANCELLING', 'CANCELLED',
+           'owner_alive', 'unsafe_output_parent']

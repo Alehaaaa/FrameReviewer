@@ -21,7 +21,8 @@ def output_target(spec):
 
 def validate_new_outputs(intents):
     """Reject direct delivery when any selected output already exists."""
-    for _context, spec in intents:
+    for intent in intents:
+        spec = intent.spec
         target = output_target(spec)
         if os.path.lexists(target):
             raise FileExistsError('Export output already exists: {}'.format(target))

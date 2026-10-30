@@ -41,6 +41,7 @@ from ..viewer.tracking import TrackingJob
 from ..exporting import ExportOptionsDialog, ExportJob
 from ..exporting.spec import ExportSpec
 from ..exporting.direct_delivery import DirectStage, validate_new_outputs
+from ..exporting.intent import build_export_intents
 from ..exporting.queue_store import ExportQueueStore
 from ..exporting.queue_runner import (ExportQueueRunner, QueueBusyError,
                                       existing_export_job_factory)
@@ -60,6 +61,7 @@ from ..notes.review_records import (ReviewDocument, ReviewSurfaceAdapter,
 from ..notes.tool_registry import TOOL_SPECS as NOTE_TOOL_SPECS, TOOL_BY_ID, tool_defaults
 from ..tools import WORKSPACE_TOOLS
 from ..widgets import CompactStack, OptionBoxAction, VolumeButton
+from ..widgets.sidebar import SidebarBuilder
 from ..widgets.sidebar_style import sidebar_stylesheet
 from ..widgets.review_panel import ReviewRecordsPanel
 
@@ -935,81 +937,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.tool_stack = QtWidgets.QStackedWidget()
         column.addWidget(self.tool_stack, 1)
         self._tool_pages = {}
-
-        def page(name, scrollable=True):
-            widget = QtWidgets.QWidget()
-            widget.setObjectName('vcPageBody')
-            layout = QtWidgets.QVBoxLayout(widget)
-            layout.setContentsMargins(12, 12, 12, 12)
-            layout.setSpacing(10)
-            if scrollable:
-                scroll = QtWidgets.QScrollArea()
-                scroll.setObjectName('vcPageScroll')
-                scroll.setWidgetResizable(True)
-                scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-                scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-                scroll.viewport().setAutoFillBackground(False)
-                scroll.setWidget(widget)
-                panel = scroll
-            else:
-                # Playlist owns an independently scrollable media list. A
-                # second QScrollArea would compress it and steal wheel events.
-                panel = widget
-            self.tool_stack.addWidget(panel)
-            self._tool_pages[name] = panel
-            return layout
-
-        def section(layout, title, collapsible=False, collapsed=False):
-            """Build a distinct, breathable group with optional disclosure."""
-            card = QtWidgets.QFrame()
-            card.setObjectName('vcCard')
-            card_layout = QtWidgets.QVBoxLayout(card)
-            card_layout.setContentsMargins(12, 10, 12, 12)
-            card_layout.setSpacing(9)
-            if collapsible:
-                key = 'sidebar/sections/' + title.lower().replace(' ', '_')
-                opened = self.settings.get_bool(key, not collapsed)
-                heading = QtWidgets.QToolButton()
-                heading.setObjectName('vcDisclosure')
-                heading.setText(title)
-                heading.setCheckable(True)
-                heading.setChecked(opened)
-                heading.setMinimumHeight(22)
-                heading.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-                heading.setArrowType(
-                    QtCore.Qt.DownArrow if opened else QtCore.Qt.RightArrow)
-            else:
-                heading = QtWidgets.QLabel(title)
-                heading.setObjectName('vcCardTitle')
-            card_layout.addWidget(heading)
-
-            content = QtWidgets.QWidget()
-            inner = QtWidgets.QVBoxLayout(content)
-            inner.setContentsMargins(0, 0, 0, 0)
-            inner.setSpacing(8)
-            card_layout.addWidget(content)
-            inner.heading = heading
-            inner.content = content
-            inner.card = card
-            if collapsible:
-                content.setVisible(opened)
-
-                def toggle(opened, body=content, button=heading, key=key):
-                    body.setVisible(opened)
-                    button.setArrowType(QtCore.Qt.DownArrow if opened
-                                        else QtCore.Qt.RightArrow)
-                    self.settings.set(key, bool(opened))
-
-                heading.toggled.connect(toggle)
-            layout.addWidget(card)
-            return inner
-
-        def hint(text):
-            # Dim, word-wrapped helper text that never clips at narrow widths.
-            label = QtWidgets.QLabel(text)
-            label.setWordWrap(True)
-            label.setProperty('dim', True)
-            return label
+        sidebar = SidebarBuilder(self.tool_stack, self._tool_pages, self.settings)
+        page, section, hint = sidebar.page, sidebar.section, sidebar.hint
+        numeric_control = sidebar.numeric_control
 
         media_page = page('media')
         source = section(media_page, 'Source')
@@ -1170,28 +1100,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.draw_swatches.append(swatch)
             color_row.addWidget(swatch)
         draw_settings_layout.addWidget(self.draw_color_panel)
-
-        def numeric_control(layout, label, minimum, maximum, value, suffix):
-            container = QtWidgets.QWidget()
-            row = QtWidgets.QHBoxLayout(container)
-            row.setContentsMargins(0, 0, 0, 0)
-            caption = QtWidgets.QLabel(label)
-            caption.setFixedWidth(64)
-            slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            slider.setRange(minimum, maximum)
-            slider.setValue(value)
-            spin = QtWidgets.QSpinBox()
-            spin.setRange(minimum, maximum)
-            spin.setValue(value)
-            spin.setSuffix(suffix)
-            spin.setFixedWidth(72)
-            slider.valueChanged.connect(spin.setValue)
-            spin.valueChanged.connect(slider.setValue)
-            row.addWidget(caption)
-            row.addWidget(slider, 1)
-            row.addWidget(spin)
-            layout.addWidget(container)
-            return slider, spin, caption, container
 
         (self.draw_width_slider, self.draw_width,
          self.draw_width_caption, self.draw_width_panel) = numeric_control(
@@ -1443,7 +1351,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.fps_combo.addItem('24 fps', '24')
         self.fps_combo.addItem('Source frame rate', 'source')
         output.addWidget(self.fps_combo)
-        output.addWidget(QtWidgets.QLabel('Color output stage'))
+        color_stage_lbl = QtWidgets.QLabel('Color output stage')
+        output.addWidget(color_stage_lbl)
         self.export_color_stage = QtWidgets.QComboBox()
         self.export_color_stage.addItem('Source (original)', 'source')
         self.export_color_stage.addItem('Working (scene-linear EXR)', 'working')
@@ -1553,6 +1462,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             lambda *_: self._sync_export_audio_controls())
         self.export_color_stage.currentIndexChanged.connect(
             lambda *_: self._sync_export_audio_controls())
+        # Color stage, audio and record delivery are hidden for now; exports
+        # stay on the Source stage, which keeps every audio/record option off.
+        for control in (color_stage_lbl, self.export_color_stage,
+                        self.export_preserve_audio_cb,
+                        self.export_record_audio_cb, self.export_record_av_cb,
+                        self.export_record_rgba16_cb,
+                        self.record_audio_routes_btn,
+                        self.record_audio_overlay_btn,
+                        self.record_audio_layers_btn,
+                        self.record_audio_preview_btn,
+                        self.record_audio_audition_btn):
+            control.setVisible(False)
         range_box = section(export_page, 'Export Range')
         self.export_range_lbl = QtWidgets.QLabel('No media loaded')
         range_box.addWidget(self.export_range_lbl)
@@ -8628,7 +8549,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             source_frames={'start': mapping.display_to_source(self.player.in_frame),
                            'end': mapping.display_to_source(self.player.out_frame)})
         try:
-            intents = self._build_export_intents(snapshot, dialog.paths(), stage)
+            source = self.session_controller.current
+            source_id = source.id if source is not None else ''
+            intents = build_export_intents(
+                snapshot, dialog.paths(), stage, self.info.path, source_id)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, 'Export failed', str(exc))
             return
@@ -8640,22 +8564,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                     intents, overwrite=dialog.overwrite_cb.isChecked())
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, 'Export failed', str(exc))
-
-    def _build_export_intents(self, snapshot, paths, stage):
-        source = self.session_controller.current
-        source_id = source.id if source is not None else ''
-        intents = []
-        for path in paths:
-            context = dict(
-                snapshot, path=os.path.abspath(path), source_id=source_id,
-                source_path=self.info.path, sequence=('.####.' in path),
-                color_stage=stage)
-            spec = ExportSpec.from_context(
-                context, source_path=self.info.path, source_id=source_id)
-            intents.append((context, spec))
-        if not intents:
-            raise ValueError('Select at least one export output.')
-        return intents
 
     @property
     def _export_queue(self):
@@ -8683,9 +8591,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             raise RuntimeError('Managed export staging is unavailable.')
         queued = []
         try:
-            for _context, spec in intents:
+            for intent in intents:
                 queued.append(self._export_runner.enqueue(
-                    spec, seq_files=self.info.sequence_files,
+                    intent.spec, seq_files=self.info.sequence_files,
                     width=self.info.width, height=self.info.height,
                     overwrite=overwrite))
         except Exception:
@@ -8712,7 +8620,8 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                     style.ACCENT_HI, html.escape(os.path.basename(p) or p)) for p in folders]
                 self.status_lbl.setText('Export complete. Open: ' + ' | '.join(links))
             return
-        public_context, public_spec = self._direct_export_pending.pop(0)
+        intent = self._direct_export_pending.pop(0)
+        public_context, public_spec = intent.context, intent.spec
         try:
             active, staged_context = DirectStage.create(
                 public_context, public_spec)

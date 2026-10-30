@@ -21,9 +21,9 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 
 from .record_av_mux import freeze_record_av_sources, _source_pixel_truth
+from .process import run_bounded
 
 
 FILENAME = 'record_rgba16.nut'
@@ -103,37 +103,12 @@ def _hash(path):
 def _run(args, timeout=50, byte_cap=262144, interrupted=None,
          set_process=None):
     """Cancellable bounded subprocess; never shell-execute frozen filenames."""
-    from ..media.ffmpeg import _no_window_kwargs, media_environment
-    if interrupted and interrupted():
-        raise RuntimeError('RGBA16 FFmpeg cancelled.')
-    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE, env=media_environment())
-    kwargs.update(_no_window_kwargs())
-    proc = subprocess.Popen(args, **kwargs)
-    if set_process:
-        set_process(proc)
-    deadline = time.monotonic() + timeout
-    try:
-        while True:
-            if interrupted and interrupted():
-                raise RuntimeError('RGBA16 FFmpeg cancelled.')
-            if time.monotonic() >= deadline:
-                raise RuntimeError('RGBA16 FFmpeg exceeded bounded timeout.')
-            try:
-                out, err = proc.communicate(timeout=.3)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        if proc.returncode or len(out) > byte_cap:
-            raise RuntimeError('RGBA16 FFmpeg failed or exceeded output budget: {}'.format(
-                err.decode('utf-8', 'replace')[-400:]))
-        return out
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        if set_process:
-            set_process(None)
+    return run_bounded(
+        args, timeout=timeout, output_limit=byte_cap,
+        interrupted=interrupted, set_process=set_process,
+        cancelled='RGBA16 FFmpeg cancelled.',
+        timed_out='RGBA16 FFmpeg exceeded bounded timeout.',
+        failed='RGBA16 FFmpeg failed or exceeded output budget: {}')
 
 
 def _reference_rgba16(spec, ffmpeg, frame, interrupted=None):
@@ -224,10 +199,10 @@ def render_record_rgba16(spec, ffmpeg, interrupted=None, set_process=None):
     validate_record_rgba16(spec, record)
     folder = os.path.dirname(spec.path)
     target = record_rgba16_path(spec)
-    from .queue_runner import _unsafe_output_parent
+    from .queue_store import unsafe_output_parent
     if (not os.path.basename(folder).startswith('.frqueue-') or
             not os.path.isdir(folder) or os.path.islink(folder) or
-            _unsafe_output_parent(spec.path) or
+            unsafe_output_parent(spec.path) or
             os.path.lexists(target)):
         raise ValueError('RGBA16 NUT may render only into a clean canonical private queue stage.')
     from .record_audio import audio_sidecar_path

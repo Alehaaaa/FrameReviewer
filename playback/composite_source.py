@@ -28,26 +28,7 @@ from .composition import (SEQUENCE, GRID, DIFFERENCE, INVERTED_DIFFERENCE,
                           A_B, BLEND, WIPE, SPLIT, CHECKER, OVER, FLICKER,
                           TWO_SOURCE_MODES, Composition, CompositionMember,
                           validate_mode)
-
-
-def _qimage_to_array(image):
-    import numpy as np
-    img = image.convertToFormat(QtGui.QImage.Format_RGBA8888)
-    w, h = img.width(), img.height()
-    ptr = img.constBits()
-    try:
-        ptr.setsize(h * w * 4)
-    except AttributeError:
-        pass
-    return np.frombuffer(bytes(ptr), dtype=np.uint8).reshape((h, w, 4)).copy()
-
-
-def _array_to_qimage(arr):
-    import numpy as np
-    arr = np.ascontiguousarray(arr, dtype=np.uint8)
-    h, w = arr.shape[:2]
-    return QtGui.QImage(arr.data, w, h, w * 4,
-                        QtGui.QImage.Format_RGBA8888).copy()
+from ..viewer.qimage import array_to_qimage, qimage_to_rgba
 
 
 class CompositeSource(QtCore.QObject):
@@ -690,7 +671,7 @@ class CompositeSource(QtCore.QObject):
             import numpy  # noqa: F401
         except Exception:
             return self._qt_composite(images)
-        arrays = [_qimage_to_array(img) for img in images]
+        arrays = [qimage_to_rgba(img) for img in images]
         width = images[0].width()
         height = images[0].height()
         # The software compositor is the single pixel reference for both the
@@ -707,7 +688,7 @@ class CompositeSource(QtCore.QObject):
         if self._mode == OVER and len(arrays) >= 2:
             alpha = result[:, :, 3:4]
             result[:, :, :3] /= np.maximum(alpha, 1e-8)
-        return QtGui.QPixmap.fromImage(_array_to_qimage(compositor.to_uint8(result)))
+        return QtGui.QPixmap.fromImage(array_to_qimage(compositor.to_uint8(result)))
 
     def set_color_state(self, state):
         """Optional OCIO/working/display configuration for precision comparisons.
@@ -1432,7 +1413,7 @@ class CompositeSource(QtCore.QObject):
                                       movie_precision=original.color_metadata.get(
                                           'movie_precision')))
             else:
-                payloads.append(_qimage_to_array(pixmap.toImage()))
+                payloads.append(qimage_to_rgba(pixmap.toImage()))
                 originals.append(dict(source_id=str(getattr(
                     self.composition.members[index], 'source_id', index)),
                     source_frame=mapped, stage='8-bit display fallback',

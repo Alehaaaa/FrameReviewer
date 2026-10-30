@@ -37,6 +37,7 @@ from functools import lru_cache
 from types import SimpleNamespace
 
 from ..core.qtcompat import QtCore, QtGui, QtWidgets
+from .qimage import array_to_qimage, qimage_to_rgba
 from ..playback import composition as composition_mod
 
 # Extra modes beyond the composition set that the viewer can also render.
@@ -737,26 +738,8 @@ class GPUMultiViewer(_QOpenGLWidget):
         return QtCore.QSize(64, 64)
 
     # -- QImage <-> array (software path) ----------------------------------
-    @staticmethod
-    def _qimage_to_array(image):
-        import numpy as np
-        img = image.convertToFormat(QtGui.QImage.Format_RGBA8888)
-        w, h = img.width(), img.height()
-        ptr = img.constBits()
-        try:
-            ptr.setsize(h * w * 4)
-        except AttributeError:
-            pass
-        arr = np.frombuffer(bytes(ptr), dtype=np.uint8).reshape((h, w, 4)).copy()
-        return arr
-
-    @staticmethod
-    def _array_to_qimage(arr):
-        import numpy as np
-        arr = np.ascontiguousarray(arr, dtype=np.uint8)
-        h, w = arr.shape[:2]
-        return QtGui.QImage(arr.data, w, h, w * 4,
-                            QtGui.QImage.Format_RGBA8888).copy()
+    _qimage_to_array = staticmethod(qimage_to_rgba)
+    _array_to_qimage = staticmethod(array_to_qimage)
 
 
 def create_multi_viewer(parent=None):

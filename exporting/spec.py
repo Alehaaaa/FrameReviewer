@@ -19,6 +19,8 @@ import subprocess
 import tempfile
 import stat
 
+from .process import run_bounded
+
 
 MANAGED_INPUT_EXTENSIONS = frozenset(('.exr', '.png', '.tif', '.tiff'))
 MANAGED_MOVIE_EXTENSIONS = frozenset(('.mp4', '.mov', '.mkv', '.avi', '.mxf'))
@@ -1242,36 +1244,15 @@ def _verify_movie_with_ffmpeg(spec, ffmpeg, context, interrupted=None,
     command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror',
                '-nostdin', '-i', spec.path, '-map', '0:v:0', '-an', '-sn',
                '-dn', '-f', 'null', '-', '-progress', 'pipe:1', '-nostats']
-    proc = None
     try:
-        proc = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
-        if set_process is not None:
-            set_process(proc)
-        for _attempt in range(480):
-            if interrupted is not None and interrupted():
-                proc.kill()
-                proc.communicate()
-                raise RuntimeError('Export cancelled')
-            try:
-                stdout, stderr = proc.communicate(timeout=.25)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        else:
-            proc.kill()
-            proc.communicate()
-            raise RuntimeError('FFmpeg export validation timed out.')
+        stdout = run_bounded(
+            command, timeout=120, output_limit=2 * 1024 * 1024,
+            interrupted=interrupted, set_process=set_process, poll_interval=.25,
+            cancelled='Export cancelled',
+            timed_out='FFmpeg export validation timed out.',
+            failed='FFmpeg could not decode completed export: {}')
     except OSError as exc:
         raise RuntimeError('FFmpeg could not validate export: {}'.format(exc))
-    finally:
-        if set_process is not None:
-            set_process(None)
-    if interrupted is not None and interrupted():
-        raise RuntimeError('Export cancelled')
-    if proc.returncode:
-        raise RuntimeError('FFmpeg could not decode completed export: {}'.format(
-            stderr.decode('utf-8', 'replace')[-500:]))
     progress = {}
     for line in stdout.decode('utf-8', 'replace').splitlines():
         if '=' in line:

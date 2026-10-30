@@ -25,7 +25,7 @@ from .spec import (ExportSpec, verify_output, managed_movie_plan,
                    validate_managed_movie_audio)
 from .queue_store import (ExportQueueStore, PENDING, RUNNING, COMMITTING,
                           SUCCEEDED, FAILED, CRASHED, CANCELLING, CANCELLED,
-                          _owner_alive, _unsafe_output_parent)
+                          owner_alive, unsafe_output_parent)
 
 
 class QueueBusyError(RuntimeError):
@@ -118,7 +118,7 @@ def _target_safe(spec):
     for path in (target, spec.path + '.frmanifest.json'):
         if os.path.islink(path):
             raise ValueError('Refusing to export over a symlink.')
-    if _unsafe_output_parent(spec.path):
+    if unsafe_output_parent(spec.path):
         raise ValueError('Refusing to export through a symlink parent.')
     if os.path.normpath(spec.path) != spec.path:
         raise ValueError('Refusing noncanonical output path.')
@@ -459,7 +459,7 @@ class ExportQueueRunner(object):
                 fd = os.open(self._lease_path,
                              os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
-                if _owner_alive(self._lease_path):
+                if owner_alive(self._lease_path):
                     raise QueueBusyError('Another process owns the export queue.')
                 # Dead-process lease; OS lockfile is the only disposable item.
                 try:

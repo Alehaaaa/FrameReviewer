@@ -16,8 +16,9 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import wave
+
+from .process import run_bounded
 
 
 MOV = 'record_av.mov'
@@ -121,40 +122,12 @@ def _frames(spec):
 
 def _run(args, timeout=60, limit=2*1024*1024, input_data=None,
          interrupted=None, set_process=None):
-    from ..media.ffmpeg import _no_window_kwargs, media_environment
-    if interrupted and interrupted():
-        raise RuntimeError('Record MOV FFmpeg cancelled before starting.')
-    kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
-              'stdin': subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-              'env': media_environment()}
-    kwargs.update(_no_window_kwargs())
-    proc = subprocess.Popen(args, **kwargs)
-    if set_process is not None:
-        set_process(proc)
-    end = time.monotonic() + timeout
-    try:
-        while True:
-            if interrupted and interrupted():
-                raise RuntimeError('Record MOV FFmpeg cancelled.')
-            if time.monotonic() >= end:
-                raise RuntimeError('Record MOV FFmpeg exceeded bounded runtime.')
-            try:
-                output, error = proc.communicate(input=input_data, timeout=.35)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        if proc.returncode or len(output) > limit:
-            raise RuntimeError('Record A/V FFmpeg verification or mux failed: {}'.format(
-                error.decode('utf-8', 'replace')[-350:]))
-        if interrupted and interrupted():
-            raise RuntimeError('Record MOV FFmpeg cancelled after completion.')
-        return output
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        if set_process is not None:
-            set_process(None)
+    return run_bounded(
+        args, timeout=timeout, output_limit=limit, input_data=input_data,
+        interrupted=interrupted, set_process=set_process, poll_interval=.35,
+        cancelled='Record MOV FFmpeg cancelled.',
+        timed_out='Record MOV FFmpeg exceeded bounded runtime.',
+        failed='Record A/V FFmpeg verification or mux failed: {}')
 
 
 def _reference_rgb8(ffmpeg, frame, width, height,
