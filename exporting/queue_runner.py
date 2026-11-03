@@ -758,16 +758,28 @@ class ExportQueueRunner(object):
         return task
 
     def remove(self, task_id):
-        """Remove an idle queue entry and its private stage, never final media."""
-        if task_id == self.active_id or not self.store.can_remove(task_id):
+        """Remove an idle queue entry and private stage; keep published media."""
+        return bool(self.remove_many((task_id,)))
+
+    def remove_many(self, task_ids):
+        """Batch-remove idle entries after validating every private stage."""
+        ids = list(dict.fromkeys(task_ids))
+        if not ids:
+            return 0
+        if any(tid == self.active_id or not self.store.can_remove(tid)
+               for tid in ids):
             raise ValueError('Cannot remove an active or recoverable export.')
-        task = self.store.get(task_id)
-        stage = (task.recovery or {}).get('stage')
-        if stage and os.path.lexists(stage):
-            if not _safe_stage(stage, task.spec, task.id) or not os.path.isdir(stage):
-                raise ValueError('Cannot safely remove the export staging folder.')
+        stages = []
+        for tid in ids:
+            task = self.store.get(tid)
+            stage = (task.recovery or {}).get('stage')
+            if stage and os.path.lexists(stage):
+                if not _safe_stage(stage, task.spec, task.id) or not os.path.isdir(stage):
+                    raise ValueError('Cannot safely remove the export staging folder.')
+                stages.append(stage)
+        for stage in dict.fromkeys(stages):
             shutil.rmtree(stage)
-        return self.store.remove(task_id)
+        return self.store.remove_many(ids)
 
     def shutdown(self, cancel_active=False, wait=False, timeout_ms=3000):
         """Stop dispatching new work; optionally request/await active shutdown.

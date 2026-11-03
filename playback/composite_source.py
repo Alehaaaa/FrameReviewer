@@ -17,6 +17,7 @@ Frames are decoded at the cache policy's display width.
 """
 from __future__ import absolute_import
 
+import bisect
 import collections
 import math
 
@@ -106,6 +107,8 @@ class CompositeSource(QtCore.QObject):
         self._member_geometries = []  # original native (w, h, PAR), not preview
         self._requested = set()
         self._last_frame = None
+        self._source_cache_coverage = {}
+        self._preroll_index = None
         self._inspection_presented = None  # exact SEQUENCE get(frame) pixmap only
         self._closed = False
         self._record_preview_v4 = bool(record_preview_v4)
@@ -182,7 +185,9 @@ class CompositeSource(QtCore.QObject):
             source.frameAvailable.connect(
                 lambda frame, index=member_index:
                     self._member_frame_available(index, frame))
-            source.cacheChanged.connect(self._member_cache_changed)
+            source.cacheChanged.connect(
+                lambda *_args, index=member_index:
+                    self._member_cache_changed(index))
             self._sources.append(source)
             self._media_infos.append(member)
             self._counts.append(count)
@@ -221,6 +226,10 @@ class CompositeSource(QtCore.QObject):
                                         for m in self.composition.members]
         else:
             self._occurrence_sources = list(range(len(self._sources)))
+        # Prefix offsets make clip lookup O(log N), independent of playlist size.
+        self._legacy_offsets = [0]
+        for count in self._counts:
+            self._legacy_offsets.append(self._legacy_offsets[-1] + count)
         self._count = self._timeline_length()
         self._record_occurrence_ids = None
         if self._record_preview_v4:
@@ -1651,14 +1660,45 @@ class CompositeSource(QtCore.QObject):
         return pixmap
 
     def _cache_ranges(self):
-        frames = sorted(self._cache)
-        ranges = []
-        for f in frames:
-            if ranges and f <= ranges[-1][1] + 1:
-                ranges[-1] = (ranges[-1][0], f)
+        """Actual resident cache: composite frames plus per-clip sequence frames.
+
+        Sequence playback returns each reader's own pixmap rather than copying
+        it to the composite cache. Report those reader caches on the global
+        timeline so the cache strip reflects real RAM residency.
+        """
+        spans = [(frame, frame) for frame in self._cache]
+        if self._mode == SEQUENCE and not self.composition.record_timeline:
+            for ranges in self._source_cache_coverage.values():
+                spans.extend(ranges)
+        result = []
+        for start, end in sorted(spans):
+            if result and start <= result[-1][1] + 1:
+                result[-1] = (result[-1][0], max(result[-1][1], end))
             else:
-                ranges.append((f, f))
-        return ranges
+                result.append((start, end))
+        return result
+
+    def _update_source_cache_coverage(self, index):
+        if (self._mode != SEQUENCE or self.composition.record_timeline or
+                not 0 <= index < len(self._sources) or
+                index >= len(self.composition.members)):
+            self._source_cache_coverage.pop(index, None)
+            return
+        from .composition import cached_source_frame_span
+        source = self._sources[index]
+        member = self.composition.members[index]
+        offset = self._legacy_offsets[index]
+        count = self._counts[index]
+        spans = []
+        # Both native movie and image-sequence readers own an LRU _cache.
+        # Its keys are actual resident source indices, never pending frames.
+        for source_frame in source._cache:
+            span = cached_source_frame_span(
+                member, source_frame, self._session_fps,
+                self._member_fps[index], offset, count)
+            if span is not None:
+                spans.append(span)
+        self._source_cache_coverage[index] = spans
 
     # -- SequenceSource-compatible no-ops / helpers ------------------------
     def ensure(self, frame, direction=1):
@@ -1667,9 +1707,26 @@ class CompositeSource(QtCore.QObject):
             return
         if self._closed:
             return
-        self._requested.add(int(frame))
+        frame = int(frame)
+        if frame in self._cache:
+            return
+        self._requested.add(frame)
         for index in self._required_members(frame):
             self._ensure_member(index, frame, direction)
+        # Warm the next movie reader shortly before a virtual clip boundary.
+        # Never start a concat render, and never prefetch heavy EXR sequences.
+        if (self._mode == SEQUENCE and not self.composition.record_timeline and
+                direction >= 0 and self._policy.cache_mode != CACHE_OFF):
+            index, local = self._sequence_location(frame)
+            if index is not None and local + 12 >= self._counts[index]:
+                upcoming = index + 1
+                if upcoming < len(self._sources) and self._preroll_index != upcoming:
+                    if isinstance(self._sources[upcoming], VideoFrameSource):
+                        self._preroll_index = upcoming
+                        self._ensure_member(
+                            upcoming, self._legacy_offsets[upcoming], 1)
+            elif self._preroll_index is not None:
+                self._preroll_index = None
 
     def _sequence_location(self, frame):
         if self.composition.record_timeline and \
@@ -1680,12 +1737,9 @@ class CompositeSource(QtCore.QObject):
             return self.composition.locate(frame)
         if not self._counts:
             return (None, None)
-        offset = 0
-        for index, count in enumerate(self._counts):
-            if frame < offset + count:
-                return index, frame - offset
-            offset += count
-        return len(self._counts) - 1, self._counts[-1] - 1
+        index = bisect.bisect_right(self._legacy_offsets, frame) - 1
+        index = min(index, len(self._counts) - 1)
+        return index, frame - self._legacy_offsets[index]
 
     def _member_frame_available(self, member_index, member_frame):
         # An asynchronous >8-bit movie sidecar may finish after the JPEG
@@ -1716,9 +1770,10 @@ class CompositeSource(QtCore.QObject):
                 self._precision_status.pop(frame, None)
                 self.frameAvailable.emit(frame)
 
-    def _member_cache_changed(self, *_args):
+    def _member_cache_changed(self, index):
         if self._closed:
             return
+        self._update_source_cache_coverage(index)
         self.cacheChanged.emit(self._cache_ranges(), None)
 
     def set_loop_start(self, frame):
@@ -1810,6 +1865,7 @@ class CompositeSource(QtCore.QObject):
             except TypeError:
                 source.shutdown()
         self._sources = []
+        self._source_cache_coverage.clear()
         self._cache.clear()
         self._precision_cache.clear()
         self._precision_status.clear()

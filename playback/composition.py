@@ -52,6 +52,41 @@ def rational_fps(value):
     return Fraction(str(value))
 
 
+def cached_source_frame_span(member, source_frame, session_fps, source_fps,
+                             clip_start, clip_count):
+    """Exact global frames represented by one resident source frame.
+
+    Playback maps timeline frames to source indices by flooring a rational
+    rate. Invert that mapping without scanning the clip, so cache indicators
+    remain accurate even for mixed frame rates and held tail frames.
+    """
+    source_frame = int(source_frame)
+    clip_count = int(clip_count)
+    if clip_count < 1 or not member.trim_in <= source_frame <= member.trim_out:
+        return None
+    rate = (member.rate if member.rate is not None else
+            rational_fps(source_fps) / rational_fps(session_fps))
+    if rate <= 0:
+        return None
+    first = math.ceil(Fraction(source_frame - member.source_in, 1) / rate)
+    last = math.ceil(Fraction(source_frame + 1 - member.source_in, 1) / rate) - 1
+    first += member.session_offset
+    last += member.session_offset
+    if member.hold and source_frame == member.trim_in:
+        first = 0
+    if member.hold and source_frame == member.trim_out:
+        last = clip_count - 1
+    first = max(0, first)
+    last = min(clip_count - 1, last)
+    if last < first:
+        return None
+    if (member.map_frame(first, session_fps, source_fps) != source_frame or
+            member.map_frame(last, session_fps, source_fps) != source_frame):
+        return None
+    start = int(clip_start)
+    return start + first, start + last
+
+
 def validate_mode(mode):
     if mode in ('ab', 'a/b', 'A/B'):
         return A_B

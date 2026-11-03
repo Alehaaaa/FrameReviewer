@@ -90,6 +90,26 @@ class QueueRemoveTests(unittest.TestCase):
             store.remove('test-id')
         self.assertEqual(store._data['tasks'][0]['id'], 'test-id')
 
+    def test_multiple_rows_use_one_durable_save(self):
+        store = _store('succeeded')
+        store._data['tasks'].append({
+            'id': 'second', 'state': 'failed', 'recovery': {}})
+        writes = mock.Mock()
+        store._save = writes
+        self.assertEqual(store.remove_many(['test-id', 'second']), 2)
+        self.assertEqual(store._data['tasks'], [])
+        writes.assert_called_once_with()
+
+    def test_multiple_removals_are_atomic_on_journal_failure(self):
+        store = _store('succeeded')
+        store._data['tasks'].append({
+            'id': 'second', 'state': 'failed', 'recovery': {}})
+        store._save = mock.Mock(side_effect=OSError('disk full'))
+        with self.assertRaises(OSError):
+            store.remove_many(['test-id', 'second'])
+        self.assertEqual([t['id'] for t in store._data['tasks']],
+                         ['test-id', 'second'])
+
     def test_runner_removes_only_private_stage(self):
         with tempfile.TemporaryDirectory() as folder:
             final = Path(folder) / 'published.mp4'
@@ -110,9 +130,9 @@ class QueueRemoveTests(unittest.TestCase):
                 def get(self, task_id):
                     return task
 
-                def remove(self, task_id):
+                def remove_many(self, task_ids):
                     self.removed = True
-                    return True
+                    return len(task_ids)
 
             runner = ExportQueueRunner.__new__(ExportQueueRunner)
             runner.store = FakeStore()

@@ -338,18 +338,26 @@ class ExportQueueStore(object):
         return not (backup and os.path.lexists(backup))
 
     def remove(self, task_id):
-        """Forget one idle queue item. Published media is never deleted."""
-        if not self.can_remove(task_id):
+        """Forget one idle queue entry, never the exported files."""
+        self.remove_many((task_id,))
+        return True
+
+    def remove_many(self, task_ids):
+        """Remove selected idle entries with one durable journal write."""
+        ids = list(dict.fromkeys(task_ids))
+        if not ids:
+            return 0
+        if not all(self.can_remove(tid) for tid in ids):
             raise ValueError('Cannot remove an active export or one awaiting recovery.')
-        record = self._find(task_id)
-        index = self._data['tasks'].index(record)
-        self._data['tasks'].pop(index)
+        original = self._data['tasks']
+        removed = set(ids)
+        self._data['tasks'] = [item for item in original if item['id'] not in removed]
         try:
             self._save()
         except Exception:
-            self._data['tasks'].insert(index, record)
+            self._data['tasks'] = original
             raise
-        return True
+        return len(ids)
 
     def _event(self, record, level, message):
         record['logs'].append({'at': _timestamp(), 'level': str(level),

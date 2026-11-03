@@ -11,6 +11,7 @@ from __future__ import absolute_import
 
 import bisect
 import copy
+from collections import OrderedDict
 import hashlib
 import html
 import json
@@ -86,6 +87,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.ffprobe = ffmpegtools.find_binary('ffprobe')
 
         self.info = None
+        self._media_probe_cache = OrderedDict()  # 32 unchanged movie probes
         # A/B review: a user-set reference clip and the latest playblast, which
         # the Toggle Reference action swaps the viewer between.
         self._reference_path = None
@@ -1498,8 +1500,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.export_queue_list.setObjectName('frameReviewerExportQueue')
         self.export_queue_list.setMinimumHeight(105)
         self.export_queue_list.setMaximumHeight(200)
+        self.export_queue_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.export_queue_list.itemSelectionChanged.connect(
+            self._update_export_queue_actions)
         self.export_queue_list.currentItemChanged.connect(
             lambda *_: self._update_export_queue_actions())
+        self._delete_queue_shortcut = QShortcut(
+            QtGui.QKeySequence('Delete'), self.export_queue_list)
+        self._delete_queue_shortcut.setContext(QtCore.Qt.WidgetShortcut)
+        self._delete_queue_shortcut.activated.connect(self._remove_queued_export)
+        self._export_queue_items = {}
+        self._export_queue_states = {}
         jobs.addWidget(self.export_queue_list)
 
         self.export_queue_start_btn = QtWidgets.QPushButton('Start')
@@ -5483,6 +5495,36 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             # of silently inheriting a different edit's soundtrack.
             self._sync_export_audio_controls()
 
+    def _probe_playback_media(self, path):
+        """Reuse unchanged movie metadata instead of repeatedly launching FFprobe.
+
+        Image sequences and EXR retain their live-file probing policy. A
+        replacement movie invalidates its entry via inode, size or mtime.
+        """
+        if os.path.splitext(path)[1].lower() not in (
+                '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.mpg', '.mpeg'):
+            return self._probe_source_media(path)
+        stamp = os.stat(path)
+        key = (os.path.normcase(os.path.realpath(path)), stamp.st_ino,
+               stamp.st_size, stamp.st_mtime_ns)
+        cache = self._media_probe_cache
+        info = cache.get(key)
+        if info is None:
+            info = self._probe_source_media(path)
+            current = os.stat(path)
+            if (current.st_ino, current.st_size, current.st_mtime_ns) == key[1:]:
+                cache[key] = info
+                if len(cache) > 32:
+                    cache.popitem(last=False)
+        else:
+            cache.move_to_end(key)
+        # Each composition member can attach its own logical Source identity.
+        fresh = copy.copy(info)
+        fresh.metadata = dict(info.metadata)
+        fresh.audio = dict(info.audio)
+        fresh.color_tags = dict(info.color_tags)
+        return fresh
+
     def _probe_all(self, paths, mode=None):
         infos = []
         identities = self._composition_source_ids(
@@ -5491,7 +5533,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                             composition_mod.SEQUENCE))
         for path, source_id in zip(paths, identities):
             try:
-                info = self._probe_source_media(path)
+                info = self._probe_playback_media(path)
                 source = self.session_controller.session.source(source_id)
                 if info.is_sequence and source is not None:
                     if (info.declared_frames is None and
@@ -7251,7 +7293,39 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.export_queue_list.addItem('Queue unavailable: {}'.format(exc))
         self._refresh_export_queue_ui()
 
-    def _refresh_export_queue_ui(self):
+    def _paint_export_queue_item(self, task, item):
+        labels = {
+            'pending': 'QUEUED', 'running': 'RUNNING', 'committing': 'FINALIZING',
+            'cancelling': 'CANCELLING', 'succeeded': '✓ DONE',
+            'failed': '✕ FAILED', 'crashed': '! INTERRUPTED',
+            'cancelled': 'CANCELLED',
+        }
+        label = labels[task.state]
+        display = '{}  ·  {}'.format(label, os.path.basename(task.spec.path))
+        if task.state in ('running', 'committing', 'cancelling'):
+            display += '  ·  {}%'.format(task.progress)
+        if item.text() != display:
+            item.setText(display)
+        tooltip = '{}\n{}{}'.format(
+            task.spec.path, label, '\n' + task.error if task.error else '')
+        if item.toolTip() != tooltip:
+            item.setToolTip(tooltip)
+        if task.state in ('failed', 'crashed'):
+            ink, bg = style.QUEUE_FAILED, style.QUEUE_FAILED_BG
+        elif task.state == 'succeeded':
+            ink, bg = style.QUEUE_SUCCESS, style.QUEUE_SUCCESS_BG
+        else:
+            ink, bg = style.SIDE_TEXT, style.SIDE_FIELD
+        item.setForeground(QtGui.QBrush(QtGui.QColor(ink)))
+        item.setBackground(QtGui.QBrush(QtGui.QColor(bg)))
+        font = item.font()
+        bold = task.state in ('failed', 'crashed', 'succeeded')
+        if font.bold() != bold:
+            font.setBold(bold)
+            item.setFont(font)
+
+    def _refresh_export_queue_ui(self, changed_task=None):
+        """Update progress in place; rebuild only when queue membership changes."""
         store = self._export_queue_store
         if store is None:
             self.export_queue_summary.setText('Queue unavailable')
@@ -7259,8 +7333,46 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                             self.export_queue_open_btn, self.export_queue_remove_btn):
                 control.setEnabled(False)
             return
-        current = self._selected_export_id()
-        tasks = store.tasks()
+        if (changed_task is not None and
+                changed_task.id in self._export_queue_items and
+                self._export_queue_states.get(changed_task.id) == changed_task.state):
+            self._paint_export_queue_item(
+                changed_task, self._export_queue_items[changed_task.id])
+            self._update_export_queue_actions()
+            return
+        tasks = list(reversed(store.tasks()))
+        ids = [task.id for task in tasks]
+        if list(self._export_queue_items) != ids:
+            selected = set(self._selected_export_ids())
+            current = self._selected_export_id()
+            self.export_queue_list.blockSignals(True)
+            self.export_queue_list.setUpdatesEnabled(False)
+            try:
+                self.export_queue_list.clear()
+                self._export_queue_items = {}
+                if not tasks:
+                    empty = QtWidgets.QListWidgetItem('No exports yet')
+                    empty.setFlags(QtCore.Qt.NoItemFlags)
+                    self.export_queue_list.addItem(empty)
+                for task in tasks:
+                    item = QtWidgets.QListWidgetItem()
+                    item.setData(QtCore.Qt.UserRole, task.id)
+                    self._paint_export_queue_item(task, item)
+                    self.export_queue_list.addItem(item)
+                    self._export_queue_items[task.id] = item
+                    if task.id in selected:
+                        item.setSelected(True)
+                    if task.id == current:
+                        self.export_queue_list.setCurrentItem(
+                            item, QtCore.QItemSelectionModel.NoUpdate)
+            finally:
+                self.export_queue_list.setUpdatesEnabled(True)
+                self.export_queue_list.blockSignals(False)
+        else:
+            for task in tasks:
+                self._paint_export_queue_item(
+                    task, self._export_queue_items[task.id])
+        self._export_queue_states = {task.id: task.state for task in tasks}
         counts = {
             'queued': sum(t.state == 'pending' for t in tasks),
             'working': sum(t.state in ('running', 'committing', 'cancelling') for t in tasks),
@@ -7269,76 +7381,46 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             'cancelled': sum(t.state == 'cancelled' for t in tasks),
         }
         self.export_queue_summary.setText(
-            '  ·  '.join('{} {}'.format(count, status)
-                        for status, count in counts.items() if count)
+            '  ·  '.join('{} {}'.format(n, name)
+                        for name, n in counts.items() if n)
             or 'No exports yet')
-        labels = {
-            'pending': 'QUEUED', 'running': 'RUNNING', 'committing': 'FINALIZING',
-            'cancelling': 'CANCELLING', 'succeeded': 'DONE',
-            'failed': 'FAILED', 'crashed': 'INTERRUPTED', 'cancelled': 'CANCELLED',
-        }
-        self.export_queue_list.blockSignals(True)
-        try:
-            self.export_queue_list.clear()
-            if not tasks:
-                empty = QtWidgets.QListWidgetItem('No exports yet')
-                empty.setFlags(QtCore.Qt.NoItemFlags)
-                self.export_queue_list.addItem(empty)
-            for task in reversed(tasks):
-                name = os.path.basename(task.spec.path)
-                label = '{}  ·  {}'.format(labels[task.state], name)
-                if task.state in ('running', 'committing', 'cancelling'):
-                    label += '  ·  {}%'.format(task.progress)
-                item = QtWidgets.QListWidgetItem(label)
-                item.setData(QtCore.Qt.UserRole, task.id)
-                item.setToolTip('{}\n{}{}'.format(
-                    task.spec.path, labels[task.state],
-                    '\n' + task.error if task.error else ''))
-                if task.state in ('failed', 'crashed'):
-                    item.setForeground(QtGui.QBrush(QtGui.QColor(style.QUEUE_FAILED)))
-                    item.setBackground(QtGui.QBrush(QtGui.QColor(style.QUEUE_FAILED_BG)))
-                elif task.state == 'succeeded':
-                    item.setForeground(QtGui.QBrush(QtGui.QColor(style.QUEUE_SUCCESS)))
-                    item.setBackground(QtGui.QBrush(QtGui.QColor(style.QUEUE_SUCCESS_BG)))
-                if task.state in ('failed', 'crashed', 'succeeded'):
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                self.export_queue_list.addItem(item)
-                if task.id == current:
-                    self.export_queue_list.setCurrentItem(item)
-        finally:
-            self.export_queue_list.blockSignals(False)
         self._update_export_queue_actions()
+
+    def _selected_export_ids(self):
+        return [item.data(QtCore.Qt.UserRole)
+                for item in self.export_queue_list.selectedItems()
+                if item.data(QtCore.Qt.UserRole)]
 
     def _selected_export_id(self):
         current = self.export_queue_list.currentItem()
         return current.data(QtCore.Qt.UserRole) if current is not None else None
 
     def _update_export_queue_actions(self):
-        store = self._export_queue_store
-        runner = self._export_runner
+        store, runner = self._export_queue_store, self._export_runner
         if store is None or runner is None:
             return
+        selected = self._selected_export_ids()
         task_id = self._selected_export_id()
         task = store.get(task_id) if task_id else None
         idle = runner.active_id is None
-        retry = task is not None and task.state in ('failed', 'crashed', 'cancelled')
+        retry = (task is not None and len(selected) <= 1 and
+                 task.state in ('failed', 'crashed', 'cancelled'))
         self.export_queue_start_btn.setEnabled(
             idle and (retry or store.next_pending() is not None))
         self.export_queue_start_btn.setToolTip(
             'Retry selected export' if retry else 'Start next queued export')
-        self.export_queue_cancel_btn.setEnabled(
-            task is not None and task.state in ('pending', 'running', 'committing'))
+        self.export_queue_cancel_btn.setEnabled(any(
+            store.get(tid).state in ('pending', 'running', 'committing')
+            for tid in selected))
         self.export_queue_open_btn.setEnabled(
-            task is not None and task.state == 'succeeded')
+            len(selected) == 1 and task is not None and task.state == 'succeeded')
         self.export_queue_remove_btn.setEnabled(
-            task is not None and store.can_remove(task.id))
+            bool(selected) and all(store.can_remove(tid) for tid in selected))
 
     def _on_export_task_change(self, task):
         if self._closed:
             return
-        self._refresh_export_queue_ui()
+        self._refresh_export_queue_ui(changed_task=task)
         runner = self._export_runner
         self._export_job = runner.active_job if runner else None
         if task.state in ('running', 'committing', 'cancelling'):
@@ -7372,12 +7454,16 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self.status_lbl.setText('Cannot start export: {}'.format(exc))
 
     def _cancel_queued_export(self):
-        tid = self._selected_export_id()
-        if tid and self._export_runner is not None:
+        runner = self._export_runner
+        if runner is None:
+            return
+        for tid in self._selected_export_ids():
             try:
-                self._export_runner.cancel(tid)
-            except (RuntimeError, ValueError) as exc:
+                runner.cancel(tid)
+            except (RuntimeError, ValueError, OSError) as exc:
                 self.status_lbl.setText('Cannot cancel export: {}'.format(exc))
+                break
+        self._refresh_export_queue_ui()
 
     def _reveal_queued_export(self):
         tid = self._selected_export_id()
@@ -7389,31 +7475,31 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
 
     def _remove_queued_export(self):
-        tid = self._selected_export_id()
-        if not tid or self._export_runner is None:
+        runner, store = self._export_runner, self._export_queue_store
+        if runner is None or store is None:
             return
-        task = self._export_queue_store.get(tid)
-        if not self._export_queue_store.can_remove(tid):
+        selected = self._selected_export_ids()
+        if not selected or not all(store.can_remove(tid) for tid in selected):
             return
-        choice = QtWidgets.QMessageBox.question(
-            self, 'Remove queue entry',
-            'Remove "{}" from Managed Queue?\n\n'
-            'Only its queue history will be removed. Exported files stay untouched.'.format(
-                os.path.basename(task.spec.path)),
+        count = len(selected)
+        message = ('Remove {} queue entries?'.format(count) if count > 1 else
+                   'Remove "{}" from Managed Queue?'.format(
+                       os.path.basename(store.get(selected[0]).spec.path)))
+        answer = QtWidgets.QMessageBox.question(
+            self, 'Remove queue entries', message +
+            '\n\nExported files will be kept. Active or recoverable jobs cannot be removed.',
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No)
-        if choice != QtWidgets.QMessageBox.Yes:
+        if answer != QtWidgets.QMessageBox.Yes:
             return
-        row = self.export_queue_list.currentRow()
         try:
-            self._export_runner.remove(tid)
+            runner.remove_many(selected)
             self._refresh_export_queue_ui()
-            if self._export_queue_store.tasks():
-                self.export_queue_list.setCurrentRow(
-                    min(row, self.export_queue_list.count() - 1))
-            self.status_lbl.setText('Queue entry removed; exported files were kept.')
+            self.status_lbl.setText(
+                '{} queue entr{} removed; exports kept.'.format(
+                    count, 'y' if count == 1 else 'ies'))
         except (RuntimeError, ValueError, OSError) as exc:
-            self.status_lbl.setText('Cannot remove queue entry: {}'.format(exc))
+            self.status_lbl.setText('Cannot remove queue entries: {}'.format(exc))
 
     def _composite_export_snapshot(self):
         """Freeze each actual playlist member, rather than preview-only pixels.
