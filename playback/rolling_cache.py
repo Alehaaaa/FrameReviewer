@@ -661,13 +661,15 @@ class VideoFrameSource(QtCore.QObject):
         # backwards. Keep the running decoder alive on cache hits; killing
         # it for every reverse movement made cached scrubbing feel slow.
         cached = frame in self._cache
-        if large_seek and not cached and self._worker is not None:
-            self._cancel_worker()
+        # Pointer events must never kill FFmpeg; the timed scheduler will
+        # replace obsolete uncached work at a bounded cadence.
         self._move_window(frame, force=direction_changed)
         if large_seek:
-            # Coalesce uncached scrubs; never spawn a decoder per mouse pixel.
-            # Cached frames remain directly available to the frame pump.
-            self._seek_timer.start()
+            # Leading-edge coalescing: do not restart the timer on every move.
+            # A trailing-edge debounce never fires during a continuous drag,
+            # leaving all uncached previews frozen until the mouse stops.
+            if not self._seek_timer.isActive():
+                self._seek_timer.start()
         elif not self._seek_timer.isActive():
             self._schedule()
 
