@@ -189,8 +189,9 @@ class CacheFirstScrubTests(unittest.TestCase):
     def test_composite_only_tracks_latest_urgent_scrub_request(self):
         code = (ROOT / 'playback' / 'composite_source.py').read_text(
             encoding='utf-8')
-        self.assertIn('self._requested.clear()\\n        self._requested.add(frame)',
-                      code)
+        self.assertRegex(
+            code,
+            r'self\._requested\.clear\(\)\s+self\._requested\.add\(frame\)')
 
     def test_window_defers_metadata_and_tracking_until_release(self):
         code = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
