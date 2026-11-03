@@ -109,7 +109,7 @@ def capture(window):
         'crop': list(crop) if crop else None,
         'flip_h': bool(window.act_flip_h.isChecked()),
         'flip_v': bool(window.act_flip_v.isChecked()),
-        'speed': float(window.speed_combo.currentData() or 1.0),
+        'speed': float(player.speed),
         'muted': bool(player.muted),
         'volume': int(window.volume_slider.value()),
         'sync_enabled': bool(window.sync_btn.isChecked()),
@@ -200,12 +200,7 @@ def apply_state(window, state):
             _try(lambda a=act, k=key: a.setChecked(bool(state[k])))
 
     if 'speed' in state:
-        choices = [window.speed_combo.itemData(i)
-                   for i in range(window.speed_combo.count())]
-        choices = [float(c) for c in choices if c is not None]
-        if choices:
-            _try(lambda: window._set_speed(
-                min(choices, key=lambda s: abs(s - float(state['speed'])))))
+        _try(lambda: window._set_speed(float(state['speed'])))
 
     if 'muted' in state:
         _try(lambda: window._set_muted(bool(state['muted'])))

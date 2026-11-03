@@ -62,12 +62,13 @@ from ..notes.review_records import (ReviewDocument, ReviewSurfaceAdapter,
 from ..notes.tool_registry import TOOL_SPECS as NOTE_TOOL_SPECS, TOOL_BY_ID, tool_defaults
 from ..tools import WORKSPACE_TOOLS
 from ..widgets import CompactStack, OptionBoxAction, VolumeButton
+from ..widgets.speed_combo import PlaybackSpeedCombo
 from ..widgets.sidebar import SidebarBuilder
 from ..widgets.sidebar_style import sidebar_stylesheet
 from ..widgets.review_panel import ReviewRecordsPanel
 
 THUMB_LANE_H = 36
-SPEEDS = (0.25, 0.5, 1.0, 1.5, 2.0)
+SPEEDS = (0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
 ICON_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'icons')
 
 
@@ -334,7 +335,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.surface.set_crop_visible(self.act_crop.isChecked())
         self._apply_tool_visibility()
         desired_speed = settings.get_float('playback/speed', 1.0)
-        self._set_speed(min(SPEEDS, key=lambda speed: abs(speed - desired_speed)))
+        self._set_speed(desired_speed)
         geometry = settings.get_bytes('window/geometry')
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -368,9 +369,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             cache_action.toggled.connect(
                 lambda enabled, value=mode: enabled and
                 self.settings.set('cache/mode', value))
-        self.speed_combo.currentIndexChanged.connect(
-            lambda *_: self.settings.set('playback/speed',
-                 float(self.speed_combo.currentData() or 1.0)))
         self.tracking_mode.currentIndexChanged.connect(
             lambda *_: self.settings.set('tracking/mode',
                                         int(self.tracking_mode.currentData() or 1)))
@@ -386,11 +384,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             lambda value: self.settings.set('draw/pressure_size', bool(value)))
         self.pressure_opacity_check.toggled.connect(
             lambda value: self.settings.set('draw/pressure_opacity', bool(value)))
-        # Speed menu selection calls _set_speed() with combo signals blocked.
-        for speed, action in self.speed_actions.items():
-            action.triggered.connect(
-                lambda _checked=False, value=speed:
-                    self.settings.set('playback/speed', float(value)))
 
     def _save_preferences(self):
         self.settings.set('window/geometry', self.saveGeometry())
@@ -1619,12 +1612,11 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         left.addSpacing(3)
         left.addWidget(separator())
         left.addSpacing(3)
-        self.speed_combo = QtWidgets.QComboBox()
-        for value in SPEEDS:
-            self.speed_combo.addItem('{:g}×'.format(value), value)
-        self.speed_combo.setCurrentIndex(SPEEDS.index(1.0))
-        self.speed_combo.setFixedWidth(64)
-        self.speed_combo.setToolTip('Playback speed')
+        self.speed_combo = PlaybackSpeedCombo(SPEEDS)
+        self.speed_combo.setFixedWidth(86)
+        self.speed_combo.setToolTip(
+            'Playback speed (×): type any value from -8 to 8, '
+            'choose a preset, or scroll by 0.25')
         left.addWidget(self.speed_combo)
 
         self.loop_btn = QtWidgets.QToolButton()
@@ -1858,8 +1850,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.set_in_btn.clicked.connect(self._mark_in)
         self.set_out_btn.clicked.connect(self._mark_out)
         self.reset_range_btn.clicked.connect(self._reset_marked_range)
-        self.speed_combo.currentIndexChanged.connect(
-            lambda: self._set_speed(float(self.speed_combo.currentData() or 1.0)))
+        self.speed_combo.speedChanged.connect(self._set_speed)
 
         if self.track_btn is not None:
             self.track_btn.clicked.connect(self._track_forward)
@@ -4382,16 +4373,17 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.timeline.set_markers(())
 
     def _set_speed(self, value):
+        """One speed state for text input, presets, J/K/L, and persistence."""
         self.player.set_speed(value)
-        if self.speed_combo.currentData() != value:
-            index = self.speed_combo.findData(value)
-            if index >= 0:
-                self.speed_combo.blockSignals(True)
-                self.speed_combo.setCurrentIndex(index)
-                self.speed_combo.blockSignals(False)
-        act = self.speed_actions.get(value)
-        if act is not None and not act.isChecked():
-            act.setChecked(True)
+        speed = float(self.player.speed)
+        self.speed_combo.set_speed(speed)
+        self._speed_group.setExclusive(False)
+        try:
+            for preset, action in self.speed_actions.items():
+                action.setChecked(abs(preset - speed) < 1e-8)
+        finally:
+            self._speed_group.setExclusive(True)
+        self.settings.set('playback/speed', speed)
 
     def _scrub(self, frame):
         self._navigation_generation += 1
