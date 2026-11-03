@@ -1577,8 +1577,12 @@ class CompositeSource(QtCore.QObject):
             return None
         self._last_frame = frame
         if frame in self._cache:
+            self._requested.clear()
             self._cache.move_to_end(frame)
             return self._cache[frame]
+        # Only the latest playhead image is urgent; underlying source readers
+        # independently prefetch. Do not accumulate obsolete scrub requests.
+        self._requested.clear()
         self._requested.add(frame)
         if not self._sources:
             return None
@@ -1709,7 +1713,9 @@ class CompositeSource(QtCore.QObject):
             return
         frame = int(frame)
         if frame in self._cache:
+            self._requested.clear()
             return
+        self._requested.clear()
         self._requested.add(frame)
         for index in self._required_members(frame):
             self._ensure_member(index, frame, direction)

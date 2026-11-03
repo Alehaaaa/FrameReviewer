@@ -123,6 +123,80 @@ class CacheFirstScrubTests(unittest.TestCase):
             source._worker = None
             source._seek_timer = previous_timer
 
+    def test_lookahead_keeps_cached_frames_across_scrub_windows(self):
+        from framereviewer.playback.cache_policy import CachePolicy, CACHE_LOOKAHEAD
+        source = VideoFrameSource('/unused/ffmpeg', '/unused/clip.mov', 24, 200,
+                                  cache_policy=CachePolicy(
+                                      max_frames=8, cache_mode=CACHE_LOOKAHEAD))
+        self.addCleanup(source.deleteLater)
+        for frame in (2, 3, 4):
+            source._cache[frame] = QtGui.QPixmap(2, 2)
+            source._cache_bytes += 16
+        source._move_window(180, force=True)
+        self.assertEqual(set(source._cache), {2, 3, 4})
+        source._cache[180] = QtGui.QPixmap(2, 2)
+        source._cache_bytes += 16
+        source._capacity = 3
+        source._prune()
+        self.assertIn(180, source._cache)
+        self.assertEqual(len(source._cache), 3)
+
+    def test_cache_off_still_evicted_at_window_change(self):
+        from framereviewer.playback.cache_policy import CachePolicy, CACHE_OFF
+        source = VideoFrameSource('/unused/ffmpeg', '/unused/clip.mov', 24, 200,
+                                  cache_policy=CachePolicy(cache_mode=CACHE_OFF))
+        self.addCleanup(source.deleteLater)
+        source._cache[2] = QtGui.QPixmap(2, 2)
+        source._cache_bytes = 16
+        source._move_window(120, force=True)
+        self.assertNotIn(2, source._cache)
+
+    def test_current_frame_upload_has_priority_over_lookahead(self):
+        from types import SimpleNamespace
+        source = VideoFrameSource('/unused/ffmpeg', '/unused/clip.mov', 24, 100)
+        self.addCleanup(source.deleteLater)
+        source._current = 50
+        worker = SimpleNamespace(generation=1)
+        source._worker = worker
+        try:
+            image = QtGui.QImage(2, 2, QtGui.QImage.Format_ARGB32)
+            source._on_image(1, 44, image)
+            source._on_image(1, 50, image)
+            source._on_image(1, 45, image)
+            self.assertEqual([entry[1] for entry in source._pending],
+                             [50, 44, 45])
+        finally:
+            source._upload_timer.stop()
+            source._pending.clear()
+            source._worker = None
+
+    def test_stale_off_window_image_does_not_upload(self):
+        from types import SimpleNamespace
+        source = VideoFrameSource('/unused/ffmpeg', '/unused/clip.mov', 24, 100)
+        self.addCleanup(source.deleteLater)
+        released = []
+        worker = SimpleNamespace(release_image=lambda: released.append(True))
+        source._worker = worker
+        source._window = (40, 60)
+        image = QtGui.QImage(2, 2, QtGui.QImage.Format_ARGB32)
+        source._pending.append((worker, 4, image))
+        with mock.patch.object(source, '_schedule'):
+            source._upload()
+        self.assertEqual(released, [True])
+        self.assertNotIn(4, source._cache)
+        source._worker = None
+
+    def test_composite_only_tracks_latest_urgent_scrub_request(self):
+        code = (ROOT / 'playback' / 'composite_source.py').read_text(
+            encoding='utf-8')
+        self.assertIn('self._requested.clear()\\n        self._requested.add(frame)',
+                      code)
+
+    def test_window_defers_metadata_and_tracking_until_release(self):
+        code = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
+        self.assertIn('if self._timeline_dragging:', code)
+        self.assertIn('self._on_frame_changed(self.player.current_frame)', code)
+
     def test_scrubbing_preserves_nonblocking_request_semantics(self):
         window = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
         player = (ROOT / 'playback' / 'player.py').read_text(encoding='utf-8')

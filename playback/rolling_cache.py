@@ -20,8 +20,8 @@ import time
 
 from ..core.qtcompat import QtCore, QtGui, Signal, Slot
 from ..core import utils
-from .cache_policy import (CachePolicy, CACHE_OFF, CACHE_REGION, ONCE, LOOP,
-                           validate_loop_mode)
+from .cache_policy import (CachePolicy, CACHE_OFF, CACHE_REGION, CACHE_LOOKAHEAD,
+                           ONCE, LOOP, validate_loop_mode)
 from ..media.ffmpeg import media_process_kwargs
 
 # VC_SEAMLESS_THREADED_CACHE_V4
@@ -741,9 +741,13 @@ class VideoFrameSource(QtCore.QObject):
 
     def _prune(self):
         low, high = self._window
-        for frame in list(self._cache):
-            if not low <= frame <= high and not self._preserve(frame):
-                self._remove(frame)
+        # Lookahead guides future decoding, not eviction of previously decoded
+        # frames. Retain hot frames across scrub jumps until capacity is full.
+        # Region/Off still use their explicit window-eviction semantics.
+        if self._policy.cache_mode != CACHE_LOOKAHEAD:
+            for frame in list(self._cache):
+                if not low <= frame <= high and not self._preserve(frame):
+                    self._remove(frame)
         while self._cache and (len(self._cache) > self._capacity or
                                (len(self._cache) > 1 and
                                 self._cache_bytes > self._policy.cache_bytes)):
@@ -894,7 +898,12 @@ class VideoFrameSource(QtCore.QObject):
                     w.release_image()
                     break
             return
-        self._pending.append((worker, int(frame), image))
+        entry = (worker, int(frame), image)
+        # Put the current display target ahead of speculative lookahead.
+        if int(frame) == self._current:
+            self._pending.appendleft(entry)
+        else:
+            self._pending.append(entry)
         if not self._upload_timer.isActive():
             self._upload_timer.start()
 
@@ -905,7 +914,10 @@ class VideoFrameSource(QtCore.QObject):
             worker, frame, image = self._pending.popleft()
             try:
                 if (not self._closed and self._worker is worker and
-                        not image.isNull()):
+                        not image.isNull() and
+                        (self._window[0] <= frame <= self._window[1] or
+                         self._preserve(frame))):
+                    # Stale off-window QImages must not consume GUI upload time.
                     pixmap = QtGui.QPixmap.fromImage(image)
                     size = pixmap.width() * pixmap.height() * 4
                     if size > 0:
