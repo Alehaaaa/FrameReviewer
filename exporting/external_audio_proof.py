@@ -16,6 +16,8 @@ import struct
 import subprocess
 import wave
 
+from ..media.ffmpeg import media_environment
+
 
 MAX_WAV_BYTES = 6 * 1024 * 1024
 RATE = 48000
@@ -102,7 +104,7 @@ def freeze_external_record_audio_proof(path, ffprobe=None):
         result = subprocess.run(
             [ffprobe, '-v', 'error'] + params + [path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35,
-            check=False)
+            check=False, env=media_environment())
         if result.returncode or len(result.stdout) > max_bytes:
             raise ValueError('External audio ffprobe failed or exceeded bounded metadata.')
         return result.stdout

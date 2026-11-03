@@ -20,6 +20,7 @@ import tempfile
 import stat
 
 from .process import run_bounded
+from ..media.ffmpeg import media_environment
 
 
 MANAGED_INPUT_EXTENSIONS = frozenset(('.exr', '.png', '.tif', '.tiff'))
@@ -48,7 +49,8 @@ def freeze_managed_composite_movie_proof(path, ffprobe=None, allow_audio=False):
     def run(args, limit):
         proc = subprocess.run([ffprobe, '-v', 'error'] + args + [path],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=60, check=False)
+                              timeout=60, check=False,
+                              env=media_environment())
         if proc.returncode or len(proc.stdout) > limit:
             raise ValueError('Movie ffprobe failed or emitted unbounded metadata: {}'.format(
                 proc.stderr.decode('utf-8', 'replace')[-350:]))
@@ -1348,7 +1350,9 @@ def verify_output(spec, ffprobe=None, ffmpeg=None, interrupted=None,
            '-show_entries', 'stream=width,height,codec_name,pix_fmt,avg_frame_rate,nb_read_frames:format=duration',
            '-of', 'json', target]
     try:
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=30)
+        output = subprocess.check_output(
+            cmd, stderr=subprocess.STDOUT, timeout=30,
+            env=media_environment())
         data = json.loads(output.decode('utf-8'))
         streams = data['streams']
         stream = streams[0]
@@ -1387,7 +1391,8 @@ def verify_output(spec, ffprobe=None, ffmpeg=None, interrupted=None,
                  '-show_entries',
                  'stream=index,codec_type,codec_name,channels,sample_rate,start_time,duration,nb_read_frames',
                  '-of', 'json', target],
-                stderr=subprocess.STDOUT, timeout=30)
+                stderr=subprocess.STDOUT, timeout=30,
+                env=media_environment())
             if len(raw_audio) > 256 * 1024:
                 raise RuntimeError('Muxed audio metadata exceeds bounded probe size.')
             audio_streams = json.loads(raw_audio.decode('utf-8'))['streams']
