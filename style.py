@@ -34,6 +34,12 @@ TOOLMODE_CHECKED = '#465159'    # an engaged tool-mode toggle
 TOOLMODE_CHECKED_BORDER = '#596f7d'
 WARNING = '#d98b4a'             # cautionary inline text
 
+# -- persistent export queue feedback ---------------------------------------
+QUEUE_SUCCESS = '#a2d7b4'        # verified export
+QUEUE_SUCCESS_BG = '#34473b'
+QUEUE_FAILED = '#ef9c9c'         # failed / interrupted export
+QUEUE_FAILED_BG = '#493536'
+
 # -- drawing / annotation ----------------------------------------------------
 CROP = ACCENT                   # crop rectangle
 DRAW_DEFAULT = '#ef5350'        # default brush / stroke color

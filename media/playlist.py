@@ -392,10 +392,6 @@ class PlaylistPanel(QtWidgets.QWidget):
             QPushButton#playlistSecondary:hover, QPushButton#playlistQuiet:hover {{
                 background: {surface}; border-color: {accent}; }}
             QPushButton#playlistQuiet {{ color: {muted}; border-color: transparent; }}
-            QCheckBox#playlistOfflineFilter {{ color: {muted};
-                background: transparent; spacing: 4px; }}
-            QCheckBox#playlistOfflineFilter::indicator {{ width: 12px;
-                height: 12px; }}
             QSlider::groove:horizontal {{ height: 4px;
                 background: {surface}; border: 1px solid {border};
                 border-radius: 2px; }}
