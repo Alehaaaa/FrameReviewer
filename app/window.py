@@ -3196,6 +3196,14 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         source = self.session_controller.session.source(source_id)
         if source is None:
             return
+        # OpenRV-style: navigating a virtual sequence is a seek, not an FFmpeg
+        # restart, a movie concat, or a full composition/probe rebuild.
+        composition = self._composition
+        if composition is not None and composition.mode == composition_mod.SEQUENCE:
+            for index, member in enumerate(composition.members):
+                if member.source_id == source_id:
+                    self._scrub(composition.clip_range(index)[0])
+                    return
         path = self.session_controller.resolved_path(source)
         if not path or not os.path.isfile(path):
             self._relink_source(source_id)
@@ -5683,9 +5691,9 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self._load(infos[0])
             self.timeline.clear_segments()
         self.status_lbl.setText(
-            'Sequence: {} clips concatenated ({} frames). Up/Down jump to '
-            'the next/previous clip.'.format(len(members),
-                                             self.player.frame_count))
+            'Sequence: {} independent clips on a virtual timeline ({} frames). '
+            'Double-click or Up/Down to jump without reloading media.'.format(
+                len(members), self.player.frame_count))
         if alignment_issues:
             self.status_lbl.setText('Sequence loaded with {} media timecode '
                                     'alignment warnings.'.format(len(alignment_issues)))

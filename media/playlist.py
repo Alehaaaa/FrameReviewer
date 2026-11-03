@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """Media playlist as an embeddable sidebar panel, with composition controls.
 
-The window owns no playback: the panel is an ordered list of media paths. Any
-change -- selecting clips, changing the mode, or editing the list -- emits
-:attr:`compositionChanged` with the effective clips (the selection, or all when
-nothing is selected) and the current composition mode (sequence, grid,
-difference, or inverted difference). The window applies it live; there is no
-Compose button. The window keeps the current file in the list.
+The panel owns selection and ordering, not playback or decoding. A click or
+Shift-click only changes the selection; double-click opens a Source and Apply
+Selection explicitly updates a comparison. Playback sources stay independent,
+with a virtual sequence timeline and no intermediate concatenated media.
 
 ``PlaylistPanel`` is a plain ``QWidget`` so it docks inside the Properties
 sidebar as its own tool.
@@ -46,6 +44,8 @@ _TITLE_ROLE = int(QtCore.Qt.UserRole) + 1
 _DETAIL_ROLE = int(QtCore.Qt.UserRole) + 2
 _OFFLINE_ROLE = int(QtCore.Qt.UserRole) + 3
 _ACTIVE_ROLE = int(QtCore.Qt.UserRole) + 4
+_SEARCH_ROLE = int(QtCore.Qt.UserRole) + 5
+_PATH_ROLE = int(QtCore.Qt.UserRole) + 6
 
 
 class _SourceDelegate(QtWidgets.QStyledItemDelegate):
@@ -137,13 +137,7 @@ class _PlaylistWidget(QtWidgets.QListWidget):
 
 
 class PlaylistPanel(QtWidgets.QWidget):
-    """Live playlist: composition follows the selection (or all) and the mode.
-
-    There is no Compose button -- any change (selection, mode, or list contents)
-    emits :attr:`compositionChanged` with the *effective* clips (the selected
-    ones, or every clip when nothing is selected) and the current mode. The
-    window always keeps the current file in this list.
-    """
+    """Fast source selection, explicit comparison, and virtual timeline order."""
     compositionChanged = Signal(list, str)   # (effective paths, mode key)
     sourcesChanged = Signal(list)              # ordered stable source IDs
     comparisonParametersChanged = Signal(dict)
@@ -179,7 +173,8 @@ class PlaylistPanel(QtWidgets.QWidget):
         media_header.addWidget(self.media_summary, 1)
         media_layout.addLayout(media_header)
 
-        media_hint = QtWidgets.QLabel('Double-click to open  ·  Drag to reorder')
+        media_hint = QtWidgets.QLabel(
+            'Click / Shift-click to select  ·  Double-click to open  ·  Delete to remove')
         media_hint.setObjectName('playlistHint')
         media_layout.addWidget(media_hint)
 
@@ -210,11 +205,15 @@ class PlaylistPanel(QtWidgets.QWidget):
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.list.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
         self.list.setDefaultDropAction(QtCore.Qt.MoveAction)
-        self.list.itemSelectionChanged.connect(self._emit_composition)
+        # Selecting rows must never open decoders or rebuild the composition.
         self.list.itemSelectionChanged.connect(self._update_summary)
         self.list.itemDoubleClicked.connect(
             lambda item: self.activateRequested.emit(item.data(QtCore.Qt.UserRole)))
         self.list.model().rowsMoved.connect(self._on_rows_moved)
+        delete_key = QtWidgets.QShortcut(QtGui.QKeySequence.Delete, self.list)
+        delete_key.setContext(QtCore.Qt.WidgetShortcut)
+        delete_key.activated.connect(self._remove_selected)
+        self._delete_shortcut = delete_key
         media_layout.addWidget(self.list, 1)
 
         controls = QtWidgets.QHBoxLayout()
@@ -289,6 +288,12 @@ class PlaylistPanel(QtWidgets.QWidget):
         self.mode_combo.currentIndexChanged.connect(self._update_summary)
         mode_row.addWidget(self.mode_combo, 1)
         compare_layout.addLayout(mode_row)
+        self.apply_selection_btn = QtWidgets.QPushButton('Apply Selection')
+        self.apply_selection_btn.setObjectName('playlistPrimary')
+        self.apply_selection_btn.setToolTip(
+            'Build the comparison from selected rows (does not create a movie)')
+        self.apply_selection_btn.clicked.connect(self._emit_composition)
+        compare_layout.addWidget(self.apply_selection_btn)
 
         self.compare_hint = QtWidgets.QLabel()
         self.compare_hint.setObjectName('playlistHint')
@@ -414,18 +419,19 @@ class PlaylistPanel(QtWidgets.QWidget):
         self.media_summary.setText(summary)
         if self.composition_mode() == comp.SEQUENCE:
             self.compare_summary.setText('All clips in order')
-            self.compare_hint.setText('Sequence plays the full playlist, even when filtered.')
+            self.compare_hint.setText(
+                'Virtual timeline across independent clips. No concatenated file.')
         else:
             selected = len(self.list.selectedItems())
             self.compare_summary.setText(
                 '{} selected'.format(selected) if selected else 'All clips')
             if self.composition_mode() == comp.GRID:
                 self.compare_hint.setText(
-                    'Tile selected clips, or clear selection to include all.')
+                    'Select clips, then Apply Selection to update the comparison.')
             else:
                 self.compare_hint.setText(
-                    'First two selected clips become A and B. '
-                    'Clear selection to use the first two in the playlist.')
+                    'Shift-select A and B, then Apply Selection. '
+                    'Selection never reloads the viewer.')
 
     @staticmethod
     def _format_rate(value):
@@ -461,6 +467,7 @@ class PlaylistPanel(QtWidgets.QWidget):
         item.setData(_DETAIL_ROLE, '  ·  '.join(details))
         item.setData(_OFFLINE_ROLE, not exists)
         item.setData(_ACTIVE_ROLE, active)
+        item.setData(_PATH_ROLE, os.path.normpath(os.path.abspath(path)) if path else '')
         # Preserve a useful accessible/plain-text label for search, tooling,
         # and the default widget behavior outside the custom paint delegate.
         item.setText(('▶ ' if active else '') + name +
@@ -471,6 +478,8 @@ class PlaylistPanel(QtWidgets.QWidget):
             'Source: {}'.format(source.id) if source else None,
             ' · '.join(details),
             'Tags: {}'.format(', '.join(map(str, tags))) if tags else None))))
+        item.setData(_SEARCH_ROLE, (
+            item.text() + ' ' + item.toolTip()).casefold())
         if source is not None:
             item.setForeground(QtGui.QBrush(QtGui.QColor(
                 _color('WARNING', '#ca9674') if not exists else
@@ -515,9 +524,10 @@ class PlaylistPanel(QtWidgets.QWidget):
             self.list.clear()
             for source in controller.session.sources:
                 self._append_source(source)
-            self._active_path = (controller.current.active_path()
-                                 if controller.current else None)
-            self.set_active_path(self._active_path)
+            active = (controller.current.active_path()
+                      if controller.current else None)
+            self._active_path = None
+            self.set_active_path(active)
             if selected:
                 for item in self._items():
                     item.setSelected(item.data(QtCore.Qt.UserRole) in selected)
@@ -538,24 +548,13 @@ class PlaylistPanel(QtWidgets.QWidget):
         return item
 
     def _apply_filter(self, *args):
+        """Filter cached row metadata; no filesystem IO or media probing."""
         wanted = self.search.text().strip().casefold()
         offline_only = self.missing_only.isChecked()
         for item in self._items():
-            source = (self._controller.session.source(item.data(QtCore.Qt.UserRole))
-                      if self._controller is not None else None)
-            path = (self._controller.resolved_path(source) if source else
-                    item.data(QtCore.Qt.UserRole))
-            offline = not bool(path and os.path.exists(path))
-            if offline != bool(item.data(_OFFLINE_ROLE)):
-                name = (source.name or os.path.basename(path or '') or source.id
-                        if source else os.path.basename(path or '') or path or '')
-                self._set_item_presentation(item, name, path, not offline, source)
-            text = item.text() + ' ' + item.toolTip()
-            if source is not None:
-                text += ' ' + ' '.join(str(tag) for tag in
-                                       (source.metadata or {}).get('tags', []))
-            item.setHidden((wanted and wanted not in text.casefold()) or
-                           (offline_only and not offline))
+            item.setHidden(bool(
+                (wanted and wanted not in (item.data(_SEARCH_ROLE) or '')) or
+                (offline_only and not item.data(_OFFLINE_ROLE))))
         self._update_summary()
 
     def _sync_role_combo(self, *args):
@@ -719,31 +718,26 @@ class PlaylistPanel(QtWidgets.QWidget):
         return self.mode_combo.currentData()
 
     def set_active_path(self, path):
-        """Mark the loaded row without changing composition selection."""
+        """Change only the old/new active row; never stat every clip."""
         if not path:
             return
         target = os.path.normpath(os.path.abspath(path))
+        previous = self._active_path
+        if previous == target:
+            return
         self._active_path = target
-        suspended = self._suspend
-        self._suspend = True
-        try:
-            for row in range(self.list.count()):
-                item = self.list.item(row)
-                item_id = item.data(QtCore.Qt.UserRole)
-                source = (self._controller.session.source(item_id)
-                          if self._controller is not None else None)
-                raw = (self._controller.resolved_path(source)
-                       if source is not None else item_id)
-                item_path = os.path.normpath(raw or '')
-                font = item.font()
-                font.setBold(item_path == target)
-                item.setFont(font)
-                name = ((source.name if source is not None else
-                         os.path.basename(item_path)) or item_path)
-                self._set_item_presentation(item, name, raw,
-                                            os.path.exists(raw or ''), source)
-        finally:
-            self._suspend = suspended
+        for item in self._items():
+            row_path = item.data(_PATH_ROLE)
+            if row_path not in (previous, target):
+                continue
+            active = row_path == target
+            item.setData(_ACTIVE_ROLE, active)
+            name = str(item.data(_TITLE_ROLE) or '')
+            item.setText(('▶ ' if active else '') + name +
+                         ('  [missing]' if item.data(_OFFLINE_ROLE) else ''))
+            font = item.font()
+            font.setBold(active)
+            item.setFont(font)
         self.list.viewport().update()
 
     def _append_path(self, path):
@@ -777,27 +771,35 @@ class PlaylistPanel(QtWidgets.QWidget):
             self.add_paths(paths)
 
     def _remove_selected(self):
+        """Remove selected rows in one transaction, keeping live playback safe."""
+        selected = self.list.selectedItems()
+        if not selected:
+            return
         active = self._active_path
-        for item in self.list.selectedItems():
-            item_id = item.data(QtCore.Qt.UserRole)
-            active_source = (self._controller.source_for_path(active)
-                             if self._controller is not None and active else None)
-            if active_source is not None and item_id == active_source.id:
-                # The actively loaded source remains in the live playlist.
-                item.setSelected(False)
-                continue
-            if self._controller is not None:
-                self._controller.remove_source(item_id)
-            self.list.takeItem(self.list.row(item))
-        if active and active not in self.paths() and os.path.exists(active):
-            if self._controller is None:
-                self._append_path(active)
-            else:
-                self.add_paths([active], emit=False)
-            self.set_active_path(active)
+        active_source = (self._controller.source_for_path(active)
+                         if self._controller is not None and active else None)
+        active_id = active_source.id if active_source else active
+        removable = [item for item in selected
+                     if item.data(QtCore.Qt.UserRole) != active_id]
+        if not removable:
+            return
+        was_suspended = self._suspend
+        self._suspend = True
+        blocked = self.list.blockSignals(True)
+        try:
+            for item in sorted(removable, key=self.list.row, reverse=True):
+                item_id = item.data(QtCore.Qt.UserRole)
+                if self._controller is not None:
+                    self._controller.remove_source(item_id)
+                self.list.takeItem(self.list.row(item))
+        finally:
+            self.list.blockSignals(blocked)
+            self._suspend = was_suspended
         if self._controller is not None:
             self.sourcesChanged.emit(self.source_ids())
         self._apply_filter()
+        self._sync_role_combo()
+        # Only a real membership edit, not selection, rebuilds the timeline.
         self._emit_composition()
 
     def _relink_selected(self):

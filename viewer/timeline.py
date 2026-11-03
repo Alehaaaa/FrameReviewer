@@ -476,16 +476,21 @@ class MarkedTimelineSlider(QtWidgets.QWidget):
         well = QtCore.QRectF(MARGIN, rect.top() + rect.height() / 2.0 - 2,
                              self._inner_width(), 4)
         painter.fillRect(well, QtGui.QColor(style.TRACK))
-        # Composition clip segments tint the well so adjacent clips are legible.
+        # Dedicated top strip: the In/Out highlight must not obscure clips.
+        # Draw visible segments only; large or zoomed-out playlists stay cheap.
+        stripe_y = rect.top() + 1
+        view_left, view_right = self._view_start, self._view_end
         for start, end, _index, color in self._segments:
-            seg_x0 = self._x_for(start)
-            seg_x1 = self._x_for(min(end + 1, self._count - 1)) if end + 1 < self._count \
-                else self._x_for(end)
-            tint = QtGui.QColor(color)
-            tint.setAlpha(150)
-            painter.fillRect(
-                QtCore.QRectF(seg_x0, well.top(), max(1.0, seg_x1 - seg_x0),
-                              well.height()), tint)
+            if end < view_left or start > view_right:
+                continue
+            x0 = max(MARGIN, self._x_for(max(start, view_left)))
+            x1 = min(MARGIN + self._inner_width(),
+                     self._x_for(min(end + 1, self._count - 1, view_right)))
+            if x1 <= x0:
+                x1 = x0 + 1.0
+            painter.fillRect(QtCore.QRectF(x0, stripe_y, x1 - x0, 4),
+                             QtGui.QColor(color))
+        # The main strip continues to show the artist's marked In/Out range.
         x_in, x_out = self._x_for(self._in), self._x_for(self._out)
         painter.fillRect(QtCore.QRectF(x_in, well.top(), max(1.0, x_out - x_in), well.height()),
                          QtGui.QColor(style.ACCENT))
@@ -513,6 +518,7 @@ class MarkedTimelineSlider(QtWidgets.QWidget):
         """  # VC_SEAMLESS_CACHE_OVERLAY_V4
         if not self._cache_ranges and self._buffer_progress is None:
             return
+        # Cache is its own bottom strip; clips are always visible above it.
         height = 4
         y = track_rect.bottom() - height + 1
         start_x = MARGIN
