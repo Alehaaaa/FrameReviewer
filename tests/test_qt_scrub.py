@@ -200,6 +200,10 @@ class CacheFirstScrubTests(unittest.TestCase):
         code = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
         self.assertIn('if self._timeline_dragging:', code)
         self.assertIn('self._on_frame_changed(self.player.current_frame)', code)
+        handler = code.split('    def _on_frame_changed(self, frame):', 1)[1]
+        handler = handler.split('    def _on_playing_changed(self, playing):', 1)[0]
+        self.assertLess(handler.index('self._comparison_presented_receipt = None'),
+                        handler.index('if self._timeline_dragging:'))
 
     def test_scrubbing_preserves_nonblocking_request_semantics(self):
         window = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
