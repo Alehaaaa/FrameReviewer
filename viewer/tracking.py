@@ -15,7 +15,7 @@ import subprocess
 import time
 
 from ..core.qtcompat import QtCore, Signal
-from ..media.ffmpeg import _no_window_kwargs, media_environment
+from ..media.ffmpeg import media_process_kwargs
 
 try:
     import cv2
@@ -283,9 +283,7 @@ class TrackingJob(QtCore.QThread):
         cmd += before + ['-i', self.path] + after + [
             '-map', '0:v:0', '-frames:v', '1', '-vsync', '0',
             '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '3', 'pipe:1']
-        kwargs = dict(stderr=subprocess.DEVNULL)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stderr=subprocess.DEVNULL)
         blob = subprocess.check_output(cmd, timeout=12, **kwargs)
         return cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
 
@@ -315,10 +313,8 @@ class TrackingJob(QtCore.QThread):
                '-map', '0:v:0', '-frames:v', str(span),
                '-an', '-sn', '-vsync', '0',
                '-pix_fmt', 'bgr24', '-f', 'rawvideo', 'pipe:1']
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                      bufsize=0)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, bufsize=0)
         proc = subprocess.Popen(cmd, **kwargs)
         self._proc = proc
         try:

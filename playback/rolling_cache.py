@@ -22,7 +22,7 @@ from ..core.qtcompat import QtCore, QtGui, Signal, Slot
 from ..core import utils
 from .cache_policy import (CachePolicy, CACHE_OFF, CACHE_REGION, ONCE, LOOP,
                            validate_loop_mode)
-from ..media.ffmpeg import media_environment, _no_window_kwargs
+from ..media.ffmpeg import media_process_kwargs
 
 # VC_SEAMLESS_THREADED_CACHE_V4
 SHIFT_STEP = 12
@@ -84,10 +84,9 @@ class _MoviePrecisionWorker(QtCore.QThread):
                     '-vf', 'scale={}:{}:flags=neighbor,format=rgba64le'.format(
                         self.width, self.height), '-f', 'rawvideo',
                     '-pix_fmt', 'rgba64le', 'pipe:1']
-            kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, bufsize=0,
-                          env=media_environment())
-            kwargs.update(_no_window_kwargs())
+            kwargs = media_process_kwargs(stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, bufsize=0)
             proc = subprocess.Popen(args, **kwargs)
             with self._lock:
                 self._proc = proc
@@ -275,10 +274,9 @@ class _DecodeWorker(QtCore.QThread):
                 '-vf', "scale='min({},iw)':-2".format(self._decode_width),
                 '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '5', 'pipe:1',
             ]
-            kwargs = dict(stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          bufsize=0, env=media_environment())
-            kwargs.update(_no_window_kwargs())
+            kwargs = media_process_kwargs(stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, bufsize=0)
             proc = subprocess.Popen(args, **kwargs)
             with self._lock:
                 self._proc = proc

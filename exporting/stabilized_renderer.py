@@ -328,12 +328,11 @@ def validate_stabilized_export(frozen, *, info=None, source_id=None,
 def _ffmpeg_command(args, ffmpeg, *, input_bytes=None, cancel=None,
                     timeout=40):
     """Synchronous bounded subprocess: cancellation interrupts stalled IO."""
-    from ..media.ffmpeg import media_environment, _no_window_kwargs
+    from ..media.ffmpeg import media_process_kwargs
     _cancel(cancel)
-    kwargs = dict(stdin=(subprocess.PIPE if input_bytes is not None else
-                         subprocess.DEVNULL), stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE, env=media_environment())
-    kwargs.update(_no_window_kwargs())
+    kwargs = media_process_kwargs(
+        stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     proc = subprocess.Popen([ffmpeg, '-hide_banner', '-loglevel', 'error',
                              '-nostdin'] + list(args), **kwargs)
     data = input_bytes

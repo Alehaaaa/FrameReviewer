@@ -526,10 +526,9 @@ def _ffmpeg_float_payload(path, source_id, source_frame, generation, tier,
     if binaries is None:
         return None
     ffmpeg, ffprobe = binaries
-    from .ffmpeg import media_environment, _no_window_kwargs
-    options = dict(env=media_environment(), stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE, timeout=12)
-    options.update(_no_window_kwargs())
+    from .ffmpeg import media_process_kwargs
+    options = media_process_kwargs(stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=12)
     try:
         meta = subprocess.run([
             ffprobe, '-v', 'error', '-select_streams', 'v:0',

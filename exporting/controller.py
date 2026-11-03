@@ -17,7 +17,7 @@ import tempfile
 from fractions import Fraction
 
 from ..core.qtcompat import QtCore, QtWidgets, Signal
-from ..media.ffmpeg import _no_window_kwargs, media_environment
+from ..media.ffmpeg import media_process_kwargs
 from ..media import missing_placeholder
 from ..core import utils
 from ..viewer import tracking
@@ -261,9 +261,7 @@ class ExportJob(QtCore.QThread):
     def _execute(self, args):
         if self.isInterruptionRequested():
             raise RuntimeError('Export cancelled')
-        kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self._proc = subprocess.Popen(args, **kwargs)
         _, err = self._proc.communicate()
         code = self._proc.returncode
@@ -288,9 +286,7 @@ class ExportJob(QtCore.QThread):
                 probe, '-v', 'error', '-select_streams', 'v:0',
                 '-show_entries', 'stream=width,height,pix_fmt',
                 '-of', 'json', path]
-            kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            kwargs.update(_no_window_kwargs())
-            kwargs['env'] = media_environment()
+            kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self._decode_proc = subprocess.Popen(command, **kwargs)
             try:
                 output, err = self._decode_proc.communicate(timeout=30)
@@ -338,9 +334,7 @@ class ExportJob(QtCore.QThread):
         args = [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin',
                 '-i', path, '-frames:v', '1', '-pix_fmt', fmt,
                 '-f', 'rawvideo', 'pipe:1']
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._decode_proc = subprocess.Popen(args, **kwargs)
         try:
             raw, err = self._decode_proc.communicate(timeout=120)
@@ -474,9 +468,8 @@ class ExportJob(QtCore.QThread):
                 '-show_entries',
                 'stream=width,height,codec_name,pix_fmt,color_space,color_range,avg_frame_rate,r_frame_rate,nb_read_frames',
                 '-of', 'json', self.spec.source_path]
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                      env=media_environment())
-        kwargs.update(_no_window_kwargs())
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
         self._decode_proc = subprocess.Popen(args, **kwargs)
         try:
             output, err = self._decode_proc.communicate(timeout=30)
@@ -583,10 +576,8 @@ class ExportJob(QtCore.QThread):
                 '-vf', ','.join(filters),
                 '-fps_mode', 'passthrough', '-frames:v', str(self.spec.count),
                 '-pix_fmt', fmt, '-f', 'rawvideo', 'pipe:1']
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                       bufsize=0)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
         self._decode_proc = subprocess.Popen(args, **kwargs)
 
     def _managed_movie_next(self, np, channels):
@@ -655,9 +646,7 @@ class ExportJob(QtCore.QThread):
         args += ['-show_entries',
                  'stream=index,codec_type,codec_name,time_base,sample_rate,channels,channel_layout,start_time,duration,nb_read_frames,avg_frame_rate',
                  '-show_format', '-of', 'json', path]
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._decode_proc = subprocess.Popen(args, **kwargs)
         try:
             if self.isInterruptionRequested():
@@ -771,9 +760,7 @@ class ExportJob(QtCore.QThread):
                 'a:{}'.format(ordinal), '-show_frames', '-show_entries',
                 'frame=best_effort_timestamp_time,nb_samples',
                 '-of', 'json', self.spec.source_path]
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._decode_proc = subprocess.Popen(args, **kwargs)
         try:
             if self.isInterruptionRequested():
@@ -835,9 +822,7 @@ class ExportJob(QtCore.QThread):
                '-b:a', str(frozen['bit_rate']), '-ar', str(frozen['sample_rate']),
                '-ac', str(frozen['channels']), '-map_metadata', '-1',
                '-movflags', '+faststart', self.spec.path]
-        kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
+        kwargs = media_process_kwargs(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if self.isInterruptionRequested():
             raise RuntimeError('Managed movie audio cancelled.')
         self._proc = subprocess.Popen(cmd, **kwargs)
@@ -985,9 +970,7 @@ class ExportJob(QtCore.QThread):
         source = member['source_path']
         frozen = member['movie_proof']
         self._managed_composite_movie_check_hash(member)
-        kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
-                  'env': media_environment()}
-        kwargs.update(_no_window_kwargs())
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         def probe(args, max_bytes, timeout):
             if self.isInterruptionRequested():
@@ -1121,9 +1104,7 @@ class ExportJob(QtCore.QThread):
                 '-an', '-sn', '-dn', '-vf', filters, '-fps_mode', 'passthrough',
                 '-frames:v', '1', '-pix_fmt', 'gbrpf32le',
                 '-f', 'rawvideo', 'pipe:1']
-        kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
-                  'env': media_environment()}
-        kwargs.update(_no_window_kwargs())
+        kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._decode_proc = subprocess.Popen(args, **kwargs)
         try:
             raw, err = self._decode_proc.communicate(timeout=90)
@@ -1298,10 +1279,8 @@ class ExportJob(QtCore.QThread):
         else:
             args += ['-r', self.spec.fps, '-movflags', '+faststart',
                      encode_target]
-        kwargs = dict(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        kwargs = media_process_kwargs(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                       stderr=subprocess.PIPE, bufsize=1024 * 1024)
-        kwargs.update(_no_window_kwargs())
-        kwargs['env'] = media_environment()
         self._proc = subprocess.Popen(args, **kwargs)
         clipped = 0
         source_map = []
@@ -1572,9 +1551,7 @@ class ExportJob(QtCore.QThread):
         tempdir = tempfile.mkdtemp(prefix='framereviewer_export_')
         proc = None
         try:
-            kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=1024 * 1024)
-            kwargs.update(_no_window_kwargs())
-            kwargs['env'] = media_environment()
+            kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=1024 * 1024)
             proc = subprocess.Popen(cmd, **kwargs)
             self._proc = proc
             for i in range(c['count']):

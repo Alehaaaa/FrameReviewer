@@ -5,7 +5,7 @@ from __future__ import absolute_import
 import subprocess
 import time
 
-from ..media.ffmpeg import _no_window_kwargs, media_environment
+from ..media.ffmpeg import media_process_kwargs
 
 
 def run_bounded(args, *, timeout, output_limit, input_data=None,
@@ -16,13 +16,9 @@ def run_bounded(args, *, timeout, output_limit, input_data=None,
     """Run one non-shell process with cancellation, deadline and output cap."""
     if interrupted and interrupted():
         raise RuntimeError(cancelled)
-    kwargs = {
-        'stdin': subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-        'stdout': subprocess.PIPE,
-        'stderr': subprocess.PIPE,
-        'env': media_environment(),
-    }
-    kwargs.update(_no_window_kwargs())
+    kwargs = media_process_kwargs(
+        stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     process = subprocess.Popen(args, **kwargs)
     if set_process is not None:
         set_process(process)

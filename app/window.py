@@ -5429,7 +5429,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
 
         ``paths`` are the effective clips (the selection, or all when nothing is
         selected). One clip plays normally; two or more compose per ``mode``:
-        Sequence concatenates image sequences into one continuous timeline;
+        Sequence maps independent clips onto one virtual timeline;
         Grid and Difference/Inverted render through the software compositor.
         """
         if self._applying_composition:
@@ -5804,23 +5804,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                      'Inverted difference'}.get(mode, mode)
         self.status_lbl.setText('{}: compositing {} clips ({} frames).'.format(
             label, len(infos), total))
-
-    def _concatenated_info(self, paths, infos):
-        """One synthetic MediaInfo whose frames are every clip's, back to back.
-
-        Used for sequence composition of image-sequence clips: the existing
-        SequenceSource then plays the whole playlist continuously. FPS and
-        display size come from the first clip (mixed-rate clips play at the
-        first clip's rate).
-        """
-        files = []
-        for info in infos:
-            files.extend(info.sequence_files)
-        first = infos[0]
-        total = len(files)
-        return ffmpegtools.MediaInfo(
-            first.path, first.width, first.height, first.fps, total,
-            sequence_files=files, frame_numbers=list(range(total)))
 
     def _clear_composition(self):
         self._composition = None

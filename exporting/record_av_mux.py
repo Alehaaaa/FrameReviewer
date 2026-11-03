@@ -290,7 +290,7 @@ def render_record_av(spec, ffmpeg, interrupted=None, set_process=None):
     fd, video_path = tempfile.mkstemp(prefix='.frav-video-',suffix='.mov',dir=folder)
     os.close(fd)
     os.unlink(video_path)
-    from ..media.ffmpeg import _no_window_kwargs, media_environment
+    from ..media.ffmpeg import media_process_kwargs
     args = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin',
             '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-video_size',
             '{}x{}'.format(width, height), '-framerate', spec.fps,
@@ -299,9 +299,8 @@ def render_record_av(spec, ffmpeg, interrupted=None, set_process=None):
             '-pix_fmt', 'rgb24', '-video_track_timescale', '24000',video_path]
     process = None
     try:
-        kw = {'stdin': subprocess.PIPE, 'stdout': subprocess.DEVNULL,
-              'stderr': subprocess.PIPE, 'env': media_environment()}
-        kw.update(_no_window_kwargs())
+        kw = media_process_kwargs(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.PIPE)
         process = subprocess.Popen(args, **kw)
         if set_process is not None:
             set_process(process)

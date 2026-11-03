@@ -47,11 +47,12 @@ def configure_process(proc):
     return proc
 
 
-def _no_window_kwargs():
-    """Keep ffmpeg from flashing a console window on Windows."""
+def media_process_kwargs(**kwargs):
+    """FFmpeg subprocess options, isolated from Maya's inherited libraries."""
+    kwargs['env'] = media_environment()
     if sys.platform == 'win32':
-        return {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)}
-    return {}
+        kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    return kwargs
 
 
 def find_binary(name):
@@ -75,9 +76,8 @@ def find_binary(name):
         if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
             continue
         try:
-            kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                          env=media_environment())
-            kwargs.update(_no_window_kwargs())
+            kwargs = media_process_kwargs(stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE)
             proc = subprocess.Popen([candidate, '-version'], **kwargs)
             try:
                 _, err = proc.communicate(timeout=4)
@@ -96,8 +96,7 @@ def find_binary(name):
 
 def run(args):
     """Run to completion, returning decoded stdout; raise on failure."""
-    kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=media_environment())
-    kwargs.update(_no_window_kwargs())
+    kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     proc = subprocess.Popen(args, **kwargs)
     out, err = proc.communicate()
     if proc.returncode:

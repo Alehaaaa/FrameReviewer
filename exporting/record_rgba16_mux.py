@@ -212,7 +212,7 @@ def render_record_rgba16(spec, ffmpeg, interrupted=None, set_process=None):
     os.close(video_fd)
     os.unlink(video_path)
     w, h = spec.output_size
-    from ..media.ffmpeg import _no_window_kwargs, media_environment
+    from ..media.ffmpeg import media_process_kwargs
     args = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin',
             '-f', 'rawvideo', '-pixel_format', 'rgba64be',
             '-video_size', '{}x{}'.format(w,h), '-framerate', spec.fps,
@@ -221,9 +221,8 @@ def render_record_rgba16(spec, ffmpeg, interrupted=None, set_process=None):
             '-pix_fmt', 'gbrap16le', '-fps_mode', 'passthrough', video_path]
     encode = None
     try:
-        kw = {'stdin':subprocess.PIPE, 'stdout':subprocess.DEVNULL,
-              'stderr':subprocess.PIPE, 'env':media_environment()}
-        kw.update(_no_window_kwargs())
+        kw = media_process_kwargs(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.PIPE)
         encode = subprocess.Popen(args, **kw)
         if set_process:
             set_process(encode)

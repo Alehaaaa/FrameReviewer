@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,7 @@ if 'framereviewer' not in sys.modules:
     sys.modules['framereviewer'] = package
     package_spec.loader.exec_module(package)
 
-from framereviewer.media.ffmpeg import media_environment
+from framereviewer.media.ffmpeg import media_environment, media_process_kwargs
 from framereviewer.exporting.spec import verify_output
 from framereviewer.exporting.external_audio_proof import (
     freeze_external_record_audio_proof,
@@ -88,6 +89,15 @@ class MediaEnvironmentRegressionTests(unittest.TestCase):
                      'PYTHONPATH', 'QT_PLUGIN_PATH'):
             self.assertNotIn(name, env)
         self.assertEqual(env['UNRELATED_TEST_MARKER'], 'preserved')
+
+    def test_media_process_kwargs_preserves_streams_and_isolates_dcc(self):
+        options = media_process_kwargs(stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        self.assertEqual(options['stdout'], subprocess.PIPE)
+        self.assertEqual(options['stderr'], subprocess.PIPE)
+        self.assertNotIn('LD_LIBRARY_PATH', options['env'])
+        self.assertNotIn('LD_PRELOAD', options['env'])
+        self.assertEqual(options['env']['UNRELATED_TEST_MARKER'], 'preserved')
 
     def test_managed_video_verification_isolated_from_maya(self):
         movie = self.path / 'sample.mp4'

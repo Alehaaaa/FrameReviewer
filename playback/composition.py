@@ -7,7 +7,7 @@ re-derive it.
 
 Four modes:
 
-* ``SEQUENCE`` - the members play back to back on one concatenated timeline.
+* ``SEQUENCE`` - members play back to back on a virtual timeline.
   :meth:`Composition.segments` gives each member's global frame span and an
   alternating color so the timeline can distinguish clips, :meth:`locate` maps a
   global frame to ``(member_index, local_frame)``, and :meth:`next_clip_range` /
@@ -41,8 +41,8 @@ TWO_SOURCE_MODES = (DIFFERENCE, INVERTED_DIFFERENCE, A_B,
                     BLEND, WIPE, SPLIT, CHECKER, OVER, FLICKER)
 MODES = (SEQUENCE, GRID) + TWO_SOURCE_MODES
 
-# Alternating segment tints for the concatenated timeline (cycled per clip).
-DEFAULT_SEGMENT_COLORS = ('#3a6ea5', '#a5623a')
+# Alternating virtual-clip tints, distinct from the cache-blue indicator.
+DEFAULT_SEGMENT_COLORS = ('#806ea8', '#a97952')
 
 
 def rational_fps(value):

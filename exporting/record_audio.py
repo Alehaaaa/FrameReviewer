@@ -161,10 +161,8 @@ def _pcm(ffmpeg, path, ordinal, interrupted=None, set_process=None):
             '-af', 'aresample=48000:async=0:first_pts=0',
             '-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le',
             '-f', 's16le', 'pipe:1']
-    from ..media.ffmpeg import _no_window_kwargs, media_environment
-    kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
-              'env': media_environment()}
-    kwargs.update(_no_window_kwargs())
+    from ..media.ffmpeg import media_process_kwargs
+    kwargs = media_process_kwargs(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     process = subprocess.Popen(args, **kwargs)
     if set_process is not None:
         set_process(process)
