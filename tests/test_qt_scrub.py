@@ -89,6 +89,40 @@ class CacheFirstScrubTests(unittest.TestCase):
             source._worker = None
             source._seek_timer.stop()
 
+    def test_continuous_uncached_drag_does_not_starve_decoder(self):
+        source = VideoFrameSource('/unused/ffmpeg', '/unused/clip.mov', 24, 100)
+        self.addCleanup(source.deleteLater)
+
+        class FakeTimer:
+            active = False
+            starts = 0
+
+            def isActive(self):
+                return self.active
+
+            def start(self):
+                self.active = True
+                self.starts += 1
+
+        previous_timer = source._seek_timer
+        fake = FakeTimer()
+        source._seek_timer = fake
+        source._worker = object()
+        source._current = 10
+        try:
+            with mock.patch.object(source, '_cancel_worker',
+                                   side_effect=AssertionError('cancelled in mouse event')), \
+                 mock.patch.object(source, '_move_window'), \
+                 mock.patch.object(source, '_schedule'):
+                source.ensure(45)
+                source.ensure(75)
+                source.ensure(95)
+            self.assertEqual(fake.starts, 1)
+            self.assertEqual(source._direction, 1)
+        finally:
+            source._worker = None
+            source._seek_timer = previous_timer
+
     def test_scrubbing_preserves_nonblocking_request_semantics(self):
         window = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
         player = (ROOT / 'playback' / 'player.py').read_text(encoding='utf-8')

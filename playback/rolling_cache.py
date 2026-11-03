@@ -660,7 +660,6 @@ class VideoFrameSource(QtCore.QObject):
         # A resident frame is display-ready even if the user scrubs
         # backwards. Keep the running decoder alive on cache hits; killing
         # it for every reverse movement made cached scrubbing feel slow.
-        cached = frame in self._cache
         # Pointer events must never kill FFmpeg; the timed scheduler will
         # replace obsolete uncached work at a bounded cadence.
         self._move_window(frame, force=direction_changed)
