@@ -8,6 +8,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -94,6 +96,27 @@ class MediaEnvironmentRegressionTests(unittest.TestCase):
             sequence=False, stage='working', path=str(movie), count=4,
             fps='24', output_size=(32, 18), to_context=lambda: {})
         result = verify_output(spec, ffprobe=str(self.ffprobe))
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(result['frames_probed'], '4')
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'),
+                         'FFmpeg and FFprobe are required for the real-media smoke test')
+    def test_real_mp4_encode_and_probe(self):
+        movie = self.path / 'real.mp4'
+        command = [
+            shutil.which('ffmpeg'), '-hide_banner', '-loglevel', 'error', '-y',
+            '-f', 'lavfi', '-i', 'color=c=black:s=32x18:r=24',
+            '-frames:v', '4', '-c:v', 'mpeg4', '-pix_fmt', 'yuv420p',
+            str(movie),
+        ]
+        encode = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, env=media_environment())
+        self.assertEqual(encode.returncode, 0, encode.stderr.decode('utf-8', 'replace'))
+        spec = types.SimpleNamespace(
+            sequence=False, stage='working', path=str(movie), count=4,
+            fps='24', output_size=(32, 18), to_context=lambda: {})
+        result = verify_output(spec, ffprobe=shutil.which('ffprobe'))
         self.assertEqual(result['status'], 'verified')
         self.assertEqual(result['frames_probed'], '4')
 
