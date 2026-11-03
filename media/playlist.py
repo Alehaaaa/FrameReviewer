@@ -151,6 +151,8 @@ class PlaylistPanel(QtWidgets.QWidget):
         self._suspend = False
         self._active_path = None
         self._controller = None
+        self._visible_count = 0
+        self._offline_count = 0
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(1, 2, 1, 2)
@@ -408,8 +410,8 @@ class PlaylistPanel(QtWidgets.QWidget):
 
     def _update_summary(self, *args):
         count = self.list.count()
-        visible = sum(not item.isHidden() for item in self._items())
-        offline = sum(bool(item.data(_OFFLINE_ROLE)) for item in self._items())
+        visible = self._visible_count
+        offline = self._offline_count
         if visible != count:
             summary = '{} of {} clips'.format(visible, count)
         else:
@@ -551,10 +553,17 @@ class PlaylistPanel(QtWidgets.QWidget):
         """Filter cached row metadata; no filesystem IO or media probing."""
         wanted = self.search.text().strip().casefold()
         offline_only = self.missing_only.isChecked()
+        visible = offline = 0
         for item in self._items():
-            item.setHidden(bool(
-                (wanted and wanted not in (item.data(_SEARCH_ROLE) or '')) or
-                (offline_only and not item.data(_OFFLINE_ROLE))))
+            missing = bool(item.data(_OFFLINE_ROLE))
+            offline += missing
+            hidden = bool((wanted and wanted not in
+                           (item.data(_SEARCH_ROLE) or '')) or
+                          (offline_only and not missing))
+            item.setHidden(hidden)
+            visible += not hidden
+        self._visible_count = visible
+        self._offline_count = offline
         self._update_summary()
 
     def _sync_role_combo(self, *args):

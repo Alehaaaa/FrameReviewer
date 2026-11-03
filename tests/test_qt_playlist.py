@@ -62,6 +62,16 @@ class PlaylistInteractionTests(unittest.TestCase):
         self.assertEqual(len(widget.selectedItems()), 3)
         self.assertEqual(emissions, [])
 
+    def test_selection_does_not_rescan_all_playlist_rows(self):
+        from unittest import mock
+        widget = self.panel.list
+        with mock.patch.object(self.panel, '_items',
+                               side_effect=AssertionError('unexpected O(N) scan')):
+            widget.item(1).setSelected(True)
+            widget.item(3).setSelected(True)
+            self.application.processEvents()
+        self.assertEqual(len(widget.selectedItems()), 2)
+
     def test_delete_keeps_playing_clip_but_removes_other_selected_rows(self):
         self.panel.set_active_path(self.paths[0])
         list_widget = self.panel.list
