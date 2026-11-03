@@ -187,11 +187,14 @@ class CacheFirstScrubTests(unittest.TestCase):
         source._worker = None
 
     def test_composite_only_tracks_latest_urgent_scrub_request(self):
-        code = (ROOT / 'playback' / 'composite_source.py').read_text(
-            encoding='utf-8')
-        self.assertRegex(
-            code,
-            r'self\._requested\.clear\(\)\s+self\._requested\.add\(frame\)')
+        from framereviewer.playback.composite_source import CompositeSource
+        from framereviewer.playback.composition import SEQUENCE
+        paths = ['/unused/clip_{:04}.png'.format(i) for i in range(150)]
+        source = CompositeSource([paths], SEQUENCE)
+        self.addCleanup(source.shutdown)
+        for frame in range(150):
+            source.ensure(frame)
+            self.assertEqual(source._requested, {frame})
 
     def test_window_defers_metadata_and_tracking_until_release(self):
         code = (ROOT / 'app' / 'window.py').read_text(encoding='utf-8')
