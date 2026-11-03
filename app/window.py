@@ -69,6 +69,7 @@ from ..widgets.review_panel import ReviewRecordsPanel
 
 THUMB_LANE_H = 36
 SPEEDS = (0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+MOVIE_EXTENSIONS = ('.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.mpg', '.mpeg')
 ICON_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'icons')
 
 
@@ -2320,9 +2321,14 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 raise ValueError('Open this asset from its audio or color controls.')
             if not resolved.exists:
                 raise IOError('Missing media: ' + resolved.authored_path)
-            info = self._probe_source_media(
-                resolved.local_path, sequence_pattern=resolved.sequence_pattern,
-                ask_exr_selection=True)
+            if (not resolved.sequence_pattern and
+                    os.path.splitext(resolved.local_path)[1].lower() in
+                    MOVIE_EXTENSIONS):
+                info = self._probe_playback_media(resolved.local_path)
+            else:
+                info = self._probe_source_media(
+                    resolved.local_path, sequence_pattern=resolved.sequence_pattern,
+                    ask_exr_selection=True)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, 'Import failed', str(exc))
             return
@@ -5492,18 +5498,18 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         Image sequences and EXR retain their live-file probing policy. A
         replacement movie invalidates its entry via inode, size or mtime.
         """
-        if os.path.splitext(path)[1].lower() not in (
-                '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.mpg', '.mpeg'):
+        if os.path.splitext(path)[1].lower() not in MOVIE_EXTENSIONS:
             return self._probe_source_media(path)
         stamp = os.stat(path)
-        key = (os.path.normcase(os.path.realpath(path)), stamp.st_ino,
-               stamp.st_size, stamp.st_mtime_ns)
+        key = (os.path.normcase(os.path.realpath(path)), stamp.st_dev,
+               stamp.st_ino, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns)
         cache = self._media_probe_cache
         info = cache.get(key)
         if info is None:
             info = self._probe_source_media(path)
             current = os.stat(path)
-            if (current.st_ino, current.st_size, current.st_mtime_ns) == key[1:]:
+            if (current.st_dev, current.st_ino, current.st_size,
+                    current.st_mtime_ns, current.st_ctime_ns) == key[1:]:
                 cache[key] = info
                 if len(cache) > 32:
                     cache.popitem(last=False)
