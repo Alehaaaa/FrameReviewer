@@ -4419,10 +4419,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self.player.seek(frame, preview=preview)
 
     def _on_frame_changed(self, frame):
+        if (self._comparison_presented_receipt is not None and
+                self._comparison_presented_receipt[1] != int(frame)):
+            self._comparison_presented_receipt = None
         if self._timeline_dragging:
-            # Dragging is a visual seek, not a metadata/geometry evaluation.
-            # Keep the frame HUD immediate and reconcile expensive details on
-            # mouse release; keep any stabilised viewer transform accurate.
+            # Never carry a comparison inspection proof across a frame seek.
+            # The drag only updates the HUD, frame-linked viewer state, and
+            # stabilisation. Detailed metadata and tracking run on release.
             self.frame_lbl.setText('{} / {}'.format(
                 frame, self.player.frame_count - 1))
             self.timeline.set_frame(frame)
@@ -4430,9 +4433,6 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             if self._stabilization_plan is not None:
                 self._apply_stabilization_frame(frame)
             return
-        if (self._comparison_presented_receipt is not None and
-                self._comparison_presented_receipt[1] != int(frame)):
-            self._comparison_presented_receipt = None
         previous = self._history_frame
         self._history_frame = int(frame)
         if (previous != frame and not self._suspend_undo and
