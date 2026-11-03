@@ -3357,7 +3357,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             # never replace its display interpretation with a guessed PAR.
             return
 
-    def _load(self, info):
+    def _load(self, info, activate_player=True):
         self._navigation_generation += 1
         if not self._scene_restore_loading:
             scene_state.invalidate_pending_restore(self)
@@ -3445,14 +3445,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         active_audio = ((source.audio or {}).get('route') if source is not None and
                         not self._applying_composition else None)
         self._apply_source_color_pipeline(source)
-        self.player.load(info, audio_route=active_audio or AudioRoute())
-        # The primary viewport, annotations, crop guides and pixel inspector
-        # share one PAR+orientation matrix. Decoder pixels stay native; do not
-        # bake a display-only quarter-turn into source IDs or review geometry.
-        self._apply_view_geometry(info, source)
-        self.player.set_loop_mode(self._current_loop_mode())
-        # J/K/L shuttle speed and direction persist across media switches.
-        self.player.set_speed(float(self.player.speed or 1.0))
+        # Virtual compositions already own their decoder. Do not start a
+        # temporary first-clip player only to stop it a few lines later.
+        if activate_player:
+            self.player.load(info, audio_route=active_audio or AudioRoute())
+            self._apply_view_geometry(info, source)
+            self.player.set_loop_mode(self._current_loop_mode())
+            self.player.set_speed(float(self.player.speed or 1.0))
 
         self._set_media_window_title(info.path)
         self.media_lbl.setToolTip(info.path)
@@ -5720,12 +5719,13 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             previous_build = self._applying_composition
             self._applying_composition = True
             try:
-                self._load(placeholder)
+                self._load(placeholder, activate_player=False)
             finally:
                 self._applying_composition = previous_build
             self.player.load_frames_source(
                 source, float(source._session_fps), source.frame_count,
                 first.width, first.height)
+            self.player.set_loop_mode(self._current_loop_mode())
             self._apply_view_geometry(first)
             self.timeline.set_segments(
                 [seg.to_tuple() for seg in self._composition.segments()])
@@ -5770,7 +5770,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         previous_build = self._applying_composition
         self._applying_composition = True
         try:
-            self._load(placeholder)
+            self._load(placeholder, activate_player=False)
         finally:
             self._applying_composition = previous_build
         source = CompositeSource(
@@ -5791,6 +5791,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 self._composition.members[0].source_id)))
         self.player.load_frames_source(source, float(session_rate), source.frame_count,
                                        first.width, first.height)
+        self.player.set_loop_mode(self._current_loop_mode())
         # All comparisons share the first Source's native coordinate system.
         # Only a mixed-PAR GRID substitutes square canvas geometry. Keep the
         # Session-owned view rotation, including after warm mode switching.

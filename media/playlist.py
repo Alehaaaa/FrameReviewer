@@ -13,7 +13,7 @@ from __future__ import absolute_import
 
 import os
 
-from ..core.qtcompat import QtCore, QtGui, QtWidgets, Signal
+from ..core.qtcompat import QtCore, QtGui, QtWidgets, Signal, QShortcut
 from ..playback import composition as comp
 from ..app.session import Source, Representation, KIND_SEQUENCE, ROLE_ORIGINAL
 from .. import style
@@ -210,7 +210,7 @@ class PlaylistPanel(QtWidgets.QWidget):
         self.list.itemDoubleClicked.connect(
             lambda item: self.activateRequested.emit(item.data(QtCore.Qt.UserRole)))
         self.list.model().rowsMoved.connect(self._on_rows_moved)
-        delete_key = QtWidgets.QShortcut(QtGui.QKeySequence.Delete, self.list)
+        delete_key = QShortcut(QtGui.QKeySequence.Delete, self.list)
         delete_key.setContext(QtCore.Qt.WidgetShortcut)
         delete_key.activated.connect(self._remove_selected)
         self._delete_shortcut = delete_key
