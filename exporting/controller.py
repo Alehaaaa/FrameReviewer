@@ -474,7 +474,8 @@ class ExportJob(QtCore.QThread):
                 '-show_entries',
                 'stream=width,height,codec_name,pix_fmt,color_space,color_range,avg_frame_rate,r_frame_rate,nb_read_frames',
                 '-of', 'json', self.spec.source_path]
-        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      env=media_environment())
         kwargs.update(_no_window_kwargs())
         self._decode_proc = subprocess.Popen(args, **kwargs)
         try:
