@@ -22,6 +22,9 @@ try:
     from framereviewer.media.playlist import PlaylistPanel
     from PySide6.QtTest import QTest
 except ImportError:
+    # A configured Qt CI environment must never silently skip GUI tests.
+    if importlib.util.find_spec('PySide6') is not None:
+        raise
     QtCore = QtGui = QtWidgets = PlaylistPanel = QTest = None
 
 

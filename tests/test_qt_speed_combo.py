@@ -20,6 +20,9 @@ try:
     from framereviewer.core.qtcompat import QtCore, QtGui, QtWidgets
     from framereviewer.widgets.speed_combo import PlaybackSpeedCombo
 except ImportError:
+    # A configured Qt CI environment must never silently skip GUI tests.
+    if importlib.util.find_spec('PySide6') is not None:
+        raise
     QtCore = QtGui = QtWidgets = PlaybackSpeedCombo = None
 
 
