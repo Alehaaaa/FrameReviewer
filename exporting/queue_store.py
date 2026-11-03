@@ -326,6 +326,31 @@ class ExportQueueStore(object):
                 return self._snapshot(record)
         return None
 
+    def can_remove(self, task_id):
+        """Allow removing idle history, never active or recoverable commits."""
+        record = self._find(task_id)
+        recovery = record.get('recovery') or {}
+        if record['state'] not in (PENDING, SUCCEEDED, FAILED, CRASHED, CANCELLED):
+            return False
+        if record['state'] in (FAILED, CRASHED) and recovery.get('phase') == 'committing':
+            return False
+        backup = recovery.get('backup')
+        return not (backup and os.path.lexists(backup))
+
+    def remove(self, task_id):
+        """Forget one idle queue item. Published media is never deleted."""
+        if not self.can_remove(task_id):
+            raise ValueError('Cannot remove an active export or one awaiting recovery.')
+        record = self._find(task_id)
+        index = self._data['tasks'].index(record)
+        self._data['tasks'].pop(index)
+        try:
+            self._save()
+        except Exception:
+            self._data['tasks'].insert(index, record)
+            raise
+        return True
+
     def _event(self, record, level, message):
         record['logs'].append({'at': _timestamp(), 'level': str(level),
                                'message': str(message)[:1800]})

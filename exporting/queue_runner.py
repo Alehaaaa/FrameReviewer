@@ -757,6 +757,18 @@ class ExportQueueRunner(object):
             self.start_next()
         return task
 
+    def remove(self, task_id):
+        """Remove an idle queue entry and its private stage, never final media."""
+        if task_id == self.active_id or not self.store.can_remove(task_id):
+            raise ValueError('Cannot remove an active or recoverable export.')
+        task = self.store.get(task_id)
+        stage = (task.recovery or {}).get('stage')
+        if stage and os.path.lexists(stage):
+            if not _safe_stage(stage, task.spec, task.id) or not os.path.isdir(stage):
+                raise ValueError('Cannot safely remove the export staging folder.')
+            shutil.rmtree(stage)
+        return self.store.remove(task_id)
+
     def shutdown(self, cancel_active=False, wait=False, timeout_ms=3000):
         """Stop dispatching new work; optionally request/await active shutdown.
 

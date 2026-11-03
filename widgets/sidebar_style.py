@@ -43,9 +43,6 @@ def sidebar_stylesheet():
 
         QWidget#vcSide QLabel {{ color: {text}; background: transparent; }}
         QWidget#vcSide QLabel[dim="true"] {{ color: {muted}; }}
-        QWidget#vcSide QCheckBox {{ color: {text}; spacing: 6px;
-            background: transparent; }}
-        QWidget#vcSide QCheckBox:disabled {{ color: {subtle}; }}
         QWidget#vcSide QListWidget, QWidget#vcSide QPlainTextEdit,
         QWidget#vcSide QTextBrowser {{ background: {field}; color: {text};
             selection-background-color: {active}; border: 1px solid {edge}; }}
