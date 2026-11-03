@@ -19,7 +19,6 @@ if 'framereviewer' not in sys.modules:
 
 from framereviewer.exporting.queue_store import ExportQueueStore
 from framereviewer.exporting.queue_runner import ExportQueueRunner
-from framereviewer.widgets.sidebar_style import sidebar_stylesheet
 
 
 def _store(state, recovery=None):
@@ -33,7 +32,8 @@ def _store(state, recovery=None):
 
 class NativeCheckboxTests(unittest.TestCase):
     def test_sidebar_has_no_qcheckbox_styles(self):
-        self.assertNotIn('QCheckBox', sidebar_stylesheet())
+        source = (ROOT / 'widgets' / 'sidebar_style.py').read_text(encoding='utf-8')
+        self.assertNotIn('QCheckBox', source)
 
     def test_playlist_keeps_native_checkbox(self):
         code = (ROOT / 'media' / 'playlist.py').read_text(encoding='utf-8')
