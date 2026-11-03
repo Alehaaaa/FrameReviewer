@@ -103,7 +103,7 @@ class MediaEnvironmentRegressionTests(unittest.TestCase):
             writer.setnchannels(2)
             writer.setsampwidth(2)
             writer.setframerate(48000)
-            writer.writeframes(b'\\x00' * (16 * 4))
+            writer.writeframes(bytes(16 * 4))
         proof = freeze_external_record_audio_proof(
             str(wav), ffprobe=str(self.ffprobe))
         self.assertEqual(proof['sample_frames'], 16)
