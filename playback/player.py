@@ -140,6 +140,7 @@ class Player(QtCore.QObject):
         # this token across synchronous source reads: cacheChanged listeners
         # can reenter seek/load while get()/get_payload() are running.
         self._frame_request_serial = 0
+        self._scrub_preview = False
         self._signal_bindings = {'native': [], 'source': [], 'pump': [],
                                  'audio': []}
         self._native_seek_latch_us = None
@@ -1195,6 +1196,11 @@ class Player(QtCore.QObject):
         if not self._current_frames_request(generation, source, frame,
                                             request_serial):
             return
+        if self._scrub_preview:
+            # Display cached pixels now; postpone PCM/device work until
+            # mouse release. Old decode callbacks are generation-guarded.
+            self._emit_frame(frame)
+            return
         self._sync_record_audio()
         # A positive audio delay leaves the audio clock paused until the video
         # reaches the offset. Check on actual displayed frames (not every Qt
@@ -1416,7 +1422,7 @@ class Player(QtCore.QObject):
         self.current_frame = int(utils.clamp(frame, 0, self.frame_count - 1))
         self._emit_frame(self.current_frame)
 
-    def seek(self, frame):
+    def seek(self, frame, preview=False):
         if self.info is None:
             return
         # Manual navigation may inspect the whole source outside the marked
@@ -1459,19 +1465,37 @@ class Player(QtCore.QObject):
             self._audio_clock_stalled = False
             self._audio_stall_realign_attempted = False
             self._audio_last_progress_ms = None
-            self._pump.seek(frame, restrict_to_range=False)
+            previous_preview = self._scrub_preview
+            self._scrub_preview = bool(preview)
+            try:
+                self._pump.seek(frame, restrict_to_range=False)
+            finally:
+                self._scrub_preview = previous_preview
             if not self._current_frames_request(generation, source, frame,
                                                 request_serial):
                 return
-            self._sync_fallback_audio(force=changed)
-            # Explicit video-master seek resets the device's queued PCM tail.
-            if self._record_audio_transport is not None:
-                self._record_audio_transport.pause()
-                self._sync_record_audio()
+            if not preview:
+                self._sync_fallback_audio(force=changed)
+                # Explicit video-master seek resets the queued PCM tail.
+                if self._record_audio_transport is not None:
+                    self._record_audio_transport.pause()
+                    self._sync_record_audio()
         if (self._media_generation == generation and
                 self._frame_request_serial == request_serial and
                 frame == self.current_frame):
             self._emit_frame(frame)
+
+    def finish_scrub(self):
+        """Commit the final drag position to audio once, not on every pixel."""
+        if self.info is None:
+            return
+        if self._backend == 'qt':
+            self._flush_native_seek()
+        elif self._backend == 'frames':
+            self._sync_fallback_audio(force=True)
+            if self._record_audio_transport is not None:
+                self._record_audio_transport.pause()
+                self._sync_record_audio()
 
     def _flush_native_seek(self):
         self._native_scrub_timer.stop()

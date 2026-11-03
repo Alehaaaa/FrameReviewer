@@ -100,6 +100,7 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
         self._scene_restore_generation = 0
         self._scene_restore_loading = False
         self._navigation_generation = 0
+        self._timeline_dragging = False
         self._crop_edit_generation = 0
         self._closed = False
         self._shutting_down = False
@@ -1821,7 +1822,10 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                 self._on_review_attachment_remove_requested)
         self.review_records_panel.createRequested.connect(self._on_new_review_note)
         self.review_records_panel.layerUpdated.connect(self._on_review_layer_updated)
-        self.timeline.scrubbed.connect(self._scrub)
+        self.timeline.scrubStarted.connect(self._begin_timeline_scrub)
+        self.timeline.scrubbed.connect(
+            lambda frame: self._scrub(frame, preview=True))
+        self.timeline.scrubFinished.connect(self._end_timeline_scrub)
         custom_menu = getattr(QtCore.Qt, 'CustomContextMenu', None)
         if custom_menu is None:
             custom_menu = QtCore.Qt.ContextMenuPolicy.CustomContextMenu
@@ -4391,13 +4395,29 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
             self._speed_group.setExclusive(True)
         self.settings.set('playback/speed', speed)
 
-    def _scrub(self, frame):
+    def _begin_timeline_scrub(self):
+        self._timeline_dragging = True
+        if self.player.playing:
+            self.player.pause()
+
+    def _end_timeline_scrub(self, frame):
+        if int(frame) != self.player.current_frame:
+            self._scrub(frame, preview=True)
+        self._timeline_dragging = False
+        self.player.finish_scrub()
+        self._sync_maya_from_player(self.player.current_frame)
+        if self.tracking_enabled:
+            self._refresh_tracking_quality()
+
+    def _scrub(self, frame, preview=False):
+        if preview and int(frame) == self.player.current_frame:
+            return
         self._navigation_generation += 1
         if self._restoring_scene_state:
             scene_state.invalidate_pending_restore(self)
         if self.player.playing:
             self.player.pause()
-        self.player.seek(frame)
+        self.player.seek(frame, preview=preview)
 
     def _on_frame_changed(self, frame):
         if (self._comparison_presented_receipt is not None and
@@ -4490,10 +4510,12 @@ class FrameReviewerWindow(MayaQWidgetDockableMixin, QtWidgets.QDialog):
                         record_bin['end_sample'] - 1))
         self.timeline.set_frame(frame)
         self.surface.set_current_frame(frame)
-        self._sync_maya_from_player(frame)
+        if not self._timeline_dragging:
+            self._sync_maya_from_player(frame)
         if self.tracking_enabled:
             self._apply_tracked_crop()
-            self._refresh_tracking_quality()
+            if not self._timeline_dragging:
+                self._refresh_tracking_quality()
         self._apply_stabilization_frame(frame)
         # A moving playhead is navigation, not an edit. Scene save/shutdown
         # still captures its final position without generating autosaves.

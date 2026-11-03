@@ -27,12 +27,16 @@ MIN_SECOND_TICK_GAP = 10.0  # At smaller scales, omit the ruler altogether.
 
 class MarkedTimelineSlider(QtWidgets.QWidget):
     scrubbed = Signal(int)
+    scrubStarted = Signal()
+    scrubFinished = Signal(int)
 
     def __init__(self, parent=None):
         QtWidgets.QWidget.__init__(self, parent)
         self._count = 1
         self._fps = 24.0
         self._frame = 0
+        self._dragging = False
+        self._drag_frame = None
         self._in = 0
         self._out = 0
         self._peaks = []
@@ -557,15 +561,41 @@ class MarkedTimelineSlider(QtWidgets.QWidget):
         painter.drawPolygon(handle)
 
     # -- interaction ------------------------------------------------------
+    def _drag_to(self, x):
+        """Move the visible playhead first, then request only changed frames."""
+        frame = self._frame_for(x)
+        if frame == self._drag_frame:
+            return
+        self._drag_frame = frame
+        self.set_frame(frame)
+        self.scrubbed.emit(frame)
+
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
-            self.scrubbed.emit(self._frame_for(event.pos().x()))
+            self._dragging = True
+            self._drag_frame = None
+            self.scrubStarted.emit()
+            self._drag_to(event.pos().x())
             event.accept()
+        else:
+            super(MarkedTimelineSlider, self).mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if event.buttons() & QtCore.Qt.LeftButton:
-            self.scrubbed.emit(self._frame_for(event.pos().x()))
+        if self._dragging and event.buttons() & QtCore.Qt.LeftButton:
+            self._drag_to(event.pos().x())
             event.accept()
+        else:
+            super(MarkedTimelineSlider, self).mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == QtCore.Qt.LeftButton:
+            self._drag_to(event.pos().x())
+            self._dragging = False
+            self._drag_frame = None
+            self.scrubFinished.emit(self._frame)
+            event.accept()
+        else:
+            super(MarkedTimelineSlider, self).mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y() or event.angleDelta().x()

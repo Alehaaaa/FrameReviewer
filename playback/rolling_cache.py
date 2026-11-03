@@ -657,16 +657,18 @@ class VideoFrameSource(QtCore.QObject):
         new_direction = 1 if direction >= 0 else -1
         direction_changed = self._direction != new_direction
         self._direction = new_direction
-        if (large_seek and self._worker is not None and
-                (frame < self._current or frame not in self._cache)):
+        # A resident frame is display-ready even if the user scrubs
+        # backwards. Keep the running decoder alive on cache hits; killing
+        # it for every reverse movement made cached scrubbing feel slow.
+        cached = frame in self._cache
+        if large_seek and not cached and self._worker is not None:
             self._cancel_worker()
         self._move_window(frame, force=direction_changed)
         if large_seek:
-            # Frequent slider events must not create one subprocess and QThread
-            # per intermediate position. Cancel obsolete work immediately and
-            # decode only the latest requested frame after the slider settles.
+            # Coalesce uncached scrubs; never spawn a decoder per mouse pixel.
+            # Cached frames remain directly available to the frame pump.
             self._seek_timer.start()
-        else:
+        elif not self._seek_timer.isActive():
             self._schedule()
 
     def _move_window(self, frame, force=False):

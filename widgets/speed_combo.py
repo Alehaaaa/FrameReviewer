@@ -19,13 +19,35 @@ class PlaybackSpeedCombo(QtWidgets.QComboBox):
         self.setEditable(True)
         self.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
         self.setMaxVisibleItems(10)
-        self.lineEdit().setAlignment(QtCore.Qt.AlignRight)
-        self.lineEdit().setPlaceholderText('1.25')
+        editor = self.lineEdit()
+        editor.setAlignment(QtCore.Qt.AlignRight)
+        editor.setPlaceholderText('1.25')
+        # Native QLineEdit remains purely numeric; the fixed multiplier is
+        # a non-selectable child label, not an editable suffix character.
+        editor.setTextMargins(0, 0, 16, 0)
+        self._multiplier = QtWidgets.QLabel('×', editor)
+        self._multiplier.setObjectName('playbackSpeedMultiplier')
+        self._multiplier.setAlignment(QtCore.Qt.AlignCenter)
+        self._multiplier.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+        self._multiplier.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self._multiplier.setFixedWidth(13)
+        editor.installEventFilter(self)
+        self._position_multiplier()
         for value in presets:
             self.addItem('{:g}×'.format(value), float(value))
         self.activated[int].connect(self._choose_preset)
         self.lineEdit().editingFinished.connect(self._commit_text)
         self.set_speed(1.0)
+
+    def _position_multiplier(self):
+        editor = self.lineEdit()
+        self._multiplier.setGeometry(
+            max(0, editor.width() - 16), 0, 13, editor.height())
+
+    def eventFilter(self, watched, event):
+        if watched is self.lineEdit() and event.type() == QtCore.QEvent.Resize:
+            self._position_multiplier()
+        return super(PlaybackSpeedCombo, self).eventFilter(watched, event)
 
     @property
     def speed(self):

@@ -45,6 +45,22 @@ class SpeedComboTests(unittest.TestCase):
             [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0])
         self.assertEqual(self.combo.speed, 1.0)
 
+    def test_multiplier_suffix_is_visual_and_not_editable(self):
+        edit = self.combo.lineEdit()
+        suffix = self.combo._multiplier
+        self.assertEqual(suffix.text(), '×')
+        self.assertIs(suffix.parent(), edit)
+        self.assertEqual(suffix.textInteractionFlags(), QtCore.Qt.NoTextInteraction)
+        self.assertTrue(suffix.testAttribute(QtCore.Qt.WA_TransparentForMouseEvents))
+        self.assertEqual(edit.text(), '1')
+        self.assertNotIn('×', edit.text())
+        edit.selectAll()
+        self.assertEqual(edit.selectedText(), '1')
+        self.combo.set_speed(2.75)
+        self.assertEqual(edit.text(), '2.75')
+        self.assertEqual(suffix.text(), '×')
+        self.assertGreater(suffix.width(), 0)
+
     def test_custom_entry_is_not_rounded_to_nearest_preset(self):
         self.combo.lineEdit().setText('1.75')
         self.combo.lineEdit().editingFinished.emit()
